@@ -23,3 +23,4 @@ configs/local_paths.yaml
 
 # Temporary converted notebooks / legacy examples
 legacy/
+scripts/generated_files/
