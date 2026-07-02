@@ -20,3 +20,6 @@ reports/figures/
 
 # Local machine paths
 configs/local_paths.yaml
+
+# Temporary converted notebooks / legacy examples
+legacy/
