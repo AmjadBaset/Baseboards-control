@@ -1,10 +1,18 @@
 baseline_cases:
   apartment_1970:
+    case_id: apartment_1970
     archetype: apartment
     construction_year: 1970
     source: openstudio
     description: "Baseline apartment building used in the original notebook workflow."
-    processed_timeseries: "data/processed/openstudio/apartment_1970/apartment_baseboard_zone_timeseries_clean_area.csv"
+
+    raw_export: "data/raw/openstudio/apartment_1970/raw_export.csv"
+
+    processed_long: "data/processed/openstudio/apartment_1970/apartment_baseboard_zone_timeseries_long.csv"
+    processed_timeseries_clean: "data/processed/openstudio/apartment_1970/apartment_baseboard_zone_timeseries_clean.csv"
+    processed_timeseries_area: "data/processed/openstudio/apartment_1970/apartment_baseboard_zone_timeseries_clean_area.csv"
     window_features: "data/processed/openstudio/apartment_1970/apartment_baseboard_3h_window_features_area_tol.csv"
+
     reference_bands: "data/reference_bands/openstudio/apartment_1970/apartment_baseboard_reference_bands_area_normalized.csv"
     persistence_thresholds: "data/reference_bands/openstudio/apartment_1970/diagnosis_persistence_thresholds.csv"
+    normal_diagnosis_fractions: "data/reference_bands/openstudio/apartment_1970/normal_reference_baseboard_diagnosis_fractions.csv"
