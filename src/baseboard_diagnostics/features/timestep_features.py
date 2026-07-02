@@ -87,7 +87,25 @@ def add_timestep_features(
     ).astype(int)
 
     df["Q_density"] = df["Q_bb"] / df["zone_area_m2"]
+    df["E_density"] = df["E_bb"] / df["zone_area_m2"]
     df["m_dot_density"] = df["m_dot"] / df["zone_area_m2"]
+
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df["hour"] = df["timestamp"].dt.hour
+
+    if "T_out" in df.columns:
+        bins = [-50, -5, 0, 5, 10, 15, 50]
+        labels = ["<-5", "-5_to_0", "0_to_5", "5_to_10", "10_to_15", ">15"]
+        df["T_out_bin"] = pd.cut(
+            df["T_out"],
+            bins=bins,
+            labels=labels,
+            include_lowest=True,
+        )
+
+    if "occupancy" in df.columns:
+        df["period"] = np.where(df["occupancy"] > 0.05, "occupied", "unoccupied")
 
     if "m_dot_design" in df.columns:
         df["normalized_flow_fraction"] = (
