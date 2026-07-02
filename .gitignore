@@ -17,3 +17,6 @@ reports/figures/
 *.sql
 
 .DS_Store
+
+# Local machine paths
+configs/local_paths.yaml
