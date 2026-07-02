@@ -1,0 +1,71 @@
+"""
+Metadata for OpenStudio archetype processing.
+
+For now this contains the apartment_1970 baseline metadata used in the
+original notebook workflow.
+"""
+
+ZONE_TO_BASEBOARD_APARTMENT_1970 = {
+    "THERMAL ZONE 1": "HW BASEBOARD",
+    "THERMAL ZONE 2": "HW BASEBOARD 6",
+    "THERMAL ZONE 3": "HW BASEBOARD 3",
+    "THERMAL ZONE 4": "HW BASEBOARD 5",
+    "THERMAL ZONE 5": "HW BASEBOARD 1",
+    "THERMAL ZONE 6": "HW BASEBOARD 4",
+    "THERMAL ZONE 7": "HW BASEBOARD 2",
+    "THERMAL ZONE 8": "HW BASEBOARD 7",
+    "THERMAL ZONE 9": "HW BASEBOARD 8",
+    "THERMAL ZONE 10": "HW BASEBOARD 9",
+    "THERMAL ZONE 11": "HW BASEBOARD 16",
+    "THERMAL ZONE 12": "HW BASEBOARD 14",
+    "THERMAL ZONE 13": "HW BASEBOARD 12",
+    "THERMAL ZONE 14": "HW BASEBOARD 22",
+    "THERMAL ZONE 15": "HW BASEBOARD 13",
+    "THERMAL ZONE 16": "HW BASEBOARD 15",
+    "THERMAL ZONE 17": "HW BASEBOARD 17",
+    "THERMAL ZONE 18": "HW BASEBOARD 10",
+    "THERMAL ZONE 19": "HW BASEBOARD 18",
+    "THERMAL ZONE 20": "HW BASEBOARD 19",
+    "THERMAL ZONE 21": "HW BASEBOARD 23",
+    "THERMAL ZONE 22": "HW BASEBOARD 20",
+    "THERMAL ZONE 23": "HW BASEBOARD 21",
+    "THERMAL ZONE 24": "HW BASEBOARD 11",
+}
+
+
+ZONE_AREA_APARTMENT_1970 = {
+    "THERMAL ZONE 1": 12.50,
+    "THERMAL ZONE 2": 12.50,
+    "THERMAL ZONE 3": 12.50,
+    "THERMAL ZONE 4": 25.00,
+    "THERMAL ZONE 5": 12.50,
+    "THERMAL ZONE 6": 25.00,
+    "THERMAL ZONE 7": 25.00,
+    "THERMAL ZONE 8": 12.50,
+    "THERMAL ZONE 9": 25.00,
+    "THERMAL ZONE 10": 25.00,
+    "THERMAL ZONE 11": 12.50,
+    "THERMAL ZONE 12": 25.00,
+    "THERMAL ZONE 13": 25.00,
+    "THERMAL ZONE 14": 25.00,
+    "THERMAL ZONE 15": 12.50,
+    "THERMAL ZONE 16": 12.50,
+    "THERMAL ZONE 17": 25.00,
+    "THERMAL ZONE 18": 12.50,
+    "THERMAL ZONE 19": 12.50,
+    "THERMAL ZONE 20": 25.00,
+    "THERMAL ZONE 21": 12.50,
+    "THERMAL ZONE 22": 12.50,
+    "THERMAL ZONE 23": 25.00,
+    "THERMAL ZONE 24": 25.00,
+}
+
+
+def get_apartment_1970_metadata():
+    """
+    Return metadata dictionaries for the apartment_1970 baseline case.
+    """
+    return {
+        "zone_to_baseboard": ZONE_TO_BASEBOARD_APARTMENT_1970,
+        "zone_area_m2": ZONE_AREA_APARTMENT_1970,
+    }
