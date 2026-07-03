@@ -47,6 +47,8 @@ def apply_diagnostic_rules(row: pd.Series) -> list[str]:
         "high",
     )
 
+    valve_effort_high = _has_label(row, "valve_effort_label", "high")
+
     # 1. Hydraulic delivery deficit
     if flow_low and q_low:
         diagnoses.append("hydraulic_delivery_deficit")
@@ -75,6 +77,18 @@ def apply_diagnostic_rules(row: pd.Series) -> list[str]:
     # This is kept as a weak rule. It should later be fused with controller ID.
     if oscillation_high and not comfort_high:
         diagnoses.append("possible_flow_or_control_instability")
+
+    # 8. Hydraulic delivery deficit with controller compensation
+    if valve_effort_high and flow_low and q_low:
+        diagnoses.append("hydraulic_delivery_deficit_with_controller_compensation")
+
+    # 9. Insufficient heat despite high controller effort
+    if valve_effort_high and comfort_high and q_low:
+        diagnoses.append("insufficient_heat_output_despite_high_controller_effort")
+
+    # 10. Early/hidden restriction: controller compensates while comfort and heat are still normal
+    if valve_effort_high and q_normal and not comfort_high:
+        diagnoses.append("possible_compensated_hydraulic_restriction")
 
     return diagnoses
 

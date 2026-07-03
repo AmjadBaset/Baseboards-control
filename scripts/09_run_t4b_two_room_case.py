@@ -10,6 +10,25 @@ import twin4build as tb
 CASE_ID = "t4b_two_room_restricted_flow"
 OUT_PATH = Path("data/raw/twin4build/two_room_restricted_flow/t4b_raw_timeseries.csv")
 
+OPENSTUDIO_TOUT_PATH = Path(
+    "data/processed/openstudio/apartment_1970/"
+    "apartment_baseboard_zone_timeseries_clean_area_new.csv"
+)
+
+T4B_TOUT_SCHEDULE_PATH = Path(
+    "data/raw/twin4build/two_room_restricted_flow/"
+    "openstudio_winter_tout_schedule.csv"
+)
+
+BASEBOARD_NOMINAL_POWER_W = 1800.0
+NOMINAL_SUPPLY_TEMP_C = 60.0
+NOMINAL_RETURN_TEMP_C = 45.0
+WATER_CP_J_PER_KG_K = 4180.0
+
+NORMAL_VALVE_MAX_FLOW = BASEBOARD_NOMINAL_POWER_W / (
+    (NOMINAL_SUPPLY_TEMP_C - NOMINAL_RETURN_TEMP_C) * WATER_CP_J_PER_KG_K
+)
+
 
 def constant_schedule(value: float) -> dict:
     return {
@@ -41,6 +60,60 @@ def make_schedule(model, name: str, value: float):
     return schedule
 
 
+
+def make_timeseries_schedule(model, name: str, filename: Path):
+    schedule = tb.ScheduleSystem(
+        useSpreadsheet=True,
+        filename=str(filename),
+        datecolumn=0,
+        valuecolumn=1,
+        id=name,
+    )
+    model.add_component(schedule)
+    return schedule
+
+
+def write_openstudio_winter_tout_schedule(
+    start_time: dt.datetime,
+    end_time: dt.datetime,
+    step_size: int,
+) -> pd.DataFrame:
+    source = pd.read_csv(OPENSTUDIO_TOUT_PATH, usecols=["timestamp", "T_out"])
+    source["timestamp"] = pd.to_datetime(source["timestamp"]).dt.tz_localize(None)
+
+    source = (
+        source
+        .groupby("timestamp", as_index=False)["T_out"]
+        .first()
+        .sort_values("timestamp")
+    )
+
+    start_naive = start_time.replace(tzinfo=None)
+    end_naive = end_time.replace(tzinfo=None)
+
+    target_index = pd.date_range(
+        start=start_naive,
+        end=end_naive,
+        freq=f"{step_size}s",
+        inclusive="left",
+    )
+
+    winter = (
+        source
+        .set_index("timestamp")
+        .reindex(target_index)
+        .interpolate(method="time")
+        .ffill()
+        .bfill()
+        .reset_index()
+        .rename(columns={"index": "timestamp"})
+    )
+
+    T4B_TOUT_SCHEDULE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    winter.to_csv(T4B_TOUT_SCHEDULE_PATH, index=False)
+
+    return winter
+
 def add_room_branch(
     model,
     suffix: str,
@@ -60,8 +133,8 @@ def add_room_branch(
             "C_air": 1.0e6,
             "C_wall": 2.0e6,
             "C_int": 5.0e5,
-            "R_out": 0.08,
-            "R_in": 0.04,
+            "R_out": 0.012,
+            "R_in": 0.012,
             "R_int": 0.02,
             "f_wall": 0.2,
             "f_air": 0.05,
@@ -72,7 +145,7 @@ def add_room_branch(
     )
 
     heater = tb.SpaceHeaterTorchSystem(
-        Q_flow_nominal_sh=1000.0,
+        Q_flow_nominal_sh=BASEBOARD_NOMINAL_POWER_W,
         T_a_nominal_sh=60.0,
         T_b_nominal_sh=45.0,
         TAir_nominal_sh=21.0,
@@ -134,13 +207,19 @@ def add_room_branch(
 def main():
     tz = dt.timezone.utc
     start_time = dt.datetime(2023, 1, 1, 0, 0, 0, tzinfo=tz)
-    end_time = dt.datetime(2023, 1, 8, 0, 0, 0, tzinfo=tz)
+    end_time = dt.datetime(2023, 4, 1, 0, 0, 0, tzinfo=tz)
     step_size = 900  # 15 minutes
+
+    winter_tout = write_openstudio_winter_tout_schedule(
+        start_time=start_time,
+        end_time=end_time,
+        step_size=step_size,
+    )
 
     model = tb.Model(id=CASE_ID)
 
     # Shared schedules
-    t_out = make_schedule(model, "schedule_outdoor_temperature", 0.0)
+    t_out = make_timeseries_schedule(model, "schedule_outdoor_temperature", T4B_TOUT_SCHEDULE_PATH)
     t_set = make_schedule(model, "schedule_room_setpoint", 21.0)
     t_supply_water = make_schedule(model, "schedule_supply_water_temperature", 60.0)
     supply_air_temp = make_schedule(model, "schedule_supply_air_temperature", 18.0)
@@ -152,7 +231,7 @@ def main():
     normal = add_room_branch(
         model=model,
         suffix="normal",
-        valve_max_flow=1000.0 / ((60.0 - 45.0) * 4180.0),
+        valve_max_flow=NORMAL_VALVE_MAX_FLOW,
         zone_area_m2=25.0,
         t_out_schedule=t_out,
         t_set_schedule=t_set,
@@ -167,7 +246,7 @@ def main():
     restricted = add_room_branch(
         model=model,
         suffix="restricted",
-        valve_max_flow=0.35 * 1000.0 / ((60.0 - 45.0) * 4180.0),
+        valve_max_flow=0.35 * NORMAL_VALVE_MAX_FLOW,
         zone_area_m2=25.0,
         t_out_schedule=t_out,
         t_set_schedule=t_set,
@@ -214,7 +293,7 @@ def main():
                 "zone": f"ROOM_{branch['suffix'].upper()}",
                 "baseboard": f"BASEBOARD_{branch['suffix'].upper()}",
                 "zone_area_m2": branch["zone_area_m2"],
-                "T_out": 0.0,
+                "T_out": winter_tout["T_out"].to_numpy()[:n],
                 "occupancy": 0.0,
                 "T_zone": T_zone[:n],
                 "T_set": 21.0,

@@ -54,6 +54,8 @@ def classify_features_against_bands(
     bands: pd.DataFrame,
     match_columns: list[str] | None = None,
     features: list[str] | None = None,
+    feature_band_mapping: dict[str, str] | None = None,
+    label_name_mapping: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """
     Merge window features with matching reference bands and classify features.
@@ -84,6 +86,12 @@ def classify_features_against_bands(
     if features is None:
         features = DEFAULT_FEATURES_TO_CLASSIFY
 
+    if feature_band_mapping is None:
+        feature_band_mapping = {}
+
+    if label_name_mapping is None:
+        label_name_mapping = {}
+
     missing_window_cols = [col for col in match_columns if col not in windows.columns]
     if missing_window_cols:
         raise ValueError(f"Missing window match columns: {missing_window_cols}")
@@ -96,8 +104,10 @@ def classify_features_against_bands(
         if feature not in windows.columns:
             raise ValueError(f"Missing window feature column: {feature}")
 
-        p10_col = f"{feature}_P10"
-        p90_col = f"{feature}_P90"
+        band_feature = feature_band_mapping.get(feature, feature)
+
+        p10_col = f"{band_feature}_P10"
+        p90_col = f"{band_feature}_P90"
 
         if p10_col not in bands.columns:
             raise ValueError(f"Missing band column: {p10_col}")
@@ -113,9 +123,11 @@ def classify_features_against_bands(
     )
 
     for feature in features:
-        p10_col = f"{feature}_P10"
-        p90_col = f"{feature}_P90"
-        label_col = f"{feature}_label"
+        band_feature = feature_band_mapping.get(feature, feature)
+
+        p10_col = f"{band_feature}_P10"
+        p90_col = f"{band_feature}_P90"
+        label_col = label_name_mapping.get(feature, f"{feature}_label")
 
         merged[label_col] = merged.apply(
             lambda row: classify_value(

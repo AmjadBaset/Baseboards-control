@@ -41,6 +41,8 @@ DEFAULT_FEATURES_FOR_BANDS = [
     "m_dot_density_std",
     "flow_oscillation_index",
     "flow_density_oscillation_index",
+    "normalized_flow_fraction_mean",
+    "normalized_flow_fraction_std",
 ]
 
 
