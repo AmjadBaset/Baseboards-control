@@ -29,6 +29,17 @@ def main():
     df = read_csv(INPUT_PATH)
     df = ensure_datetime(df, column="timestamp")
 
+    # Estimate design flow from the healthy OpenStudio baseline.
+    # This creates a dimensionless proxy for valve/controller effort:
+    # normalized_flow_fraction = m_dot / m_dot_design.
+    positive_flow = df["m_dot"].where(df["m_dot"] > 0)
+
+    df["m_dot_design"] = (
+        positive_flow
+        .groupby(df["baseboard"])
+        .transform(lambda s: s.quantile(0.99))
+    )
+
     df = add_timestep_features(
         df,
         comfort_tolerance=0.5,
