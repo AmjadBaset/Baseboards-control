@@ -127,14 +127,17 @@ def add_room_branch(
     occupancy_schedule,
     solar_schedule,
     outdoor_co2_schedule,
+    r_out: float = 0.012,
+    r_in: float = 0.012,
+    forced_valve_position_schedule=None,
 ):
     room = tb.BuildingSpaceTorchSystem(
         thermal_kwargs={
             "C_air": 1.0e6,
             "C_wall": 2.0e6,
             "C_int": 5.0e5,
-            "R_out": 0.012,
-            "R_in": 0.012,
+            "R_out": r_out,
+            "R_in": r_in,
             "R_int": 0.02,
             "f_wall": 0.2,
             "f_air": 0.05,
@@ -174,7 +177,18 @@ def add_room_branch(
     # Control loop
     model.add_connection(t_set_schedule, controller, "scheduleValue", "setpointValue")
     model.add_connection(room, controller, "indoorTemperature", "actualValue")
-    model.add_connection(controller, valve, "inputSignal", "valvePosition")
+
+    # Normal case: PID controls the valve.
+    # Fault case: valve position is forced, while PID signal is still logged.
+    if forced_valve_position_schedule is None:
+        model.add_connection(controller, valve, "inputSignal", "valvePosition")
+    else:
+        model.add_connection(
+            forced_valve_position_schedule,
+            valve,
+            "scheduleValue",
+            "valvePosition",
+        )
 
     # Hydronic loop
     model.add_connection(valve, heater, "waterFlowRate", "waterFlowRate")
@@ -228,6 +242,10 @@ def main():
     solar = make_schedule(model, "schedule_solar", 0.0)
     outdoor_co2 = make_schedule(model, "schedule_outdoor_co2", 420.0)
 
+    # Valve leakage / stuck-open fault proxy:
+    # the actuator remains partly open even if the controller would reduce demand.
+    leakage_valve_position = make_schedule(model, "schedule_leakage_valve_position", 0.15)
+
     normal = add_room_branch(
         model=model,
         suffix="normal",
@@ -256,6 +274,26 @@ def main():
         occupancy_schedule=occupancy,
         solar_schedule=solar,
         outdoor_co2_schedule=outdoor_co2,
+        r_out=0.012,
+        r_in=0.012,
+    )
+
+    leakage = add_room_branch(
+        model=model,
+        suffix="leakage",
+        valve_max_flow=NORMAL_VALVE_MAX_FLOW,
+        zone_area_m2=25.0,
+        t_out_schedule=t_out,
+        t_set_schedule=t_set,
+        t_supply_water_schedule=t_supply_water,
+        supply_air_temp_schedule=supply_air_temp,
+        air_flow_schedule=air_flow,
+        occupancy_schedule=occupancy,
+        solar_schedule=solar,
+        outdoor_co2_schedule=outdoor_co2,
+        r_out=0.018,
+        r_in=0.018,
+        forced_valve_position_schedule=leakage_valve_position,
     )
 
     model.load(draw_simulation_model=False)
@@ -270,7 +308,7 @@ def main():
     timestamps = pd.to_datetime(simulator.dateTimeSteps)
 
     rows = []
-    for branch in [normal, restricted]:
+    for branch in [normal, restricted, leakage]:
         room = branch["room"]
         heater = branch["heater"]
         controller = branch["controller"]
@@ -288,7 +326,7 @@ def main():
             {
                 "timestamp": timestamps,
                 "case_id": CASE_ID,
-                "archetype": "twin4build_two_room",
+                "archetype": "twin4build_l_shaped_three_room",
                 "construction_year": 1970,
                 "zone": f"ROOM_{branch['suffix'].upper()}",
                 "baseboard": f"BASEBOARD_{branch['suffix'].upper()}",
