@@ -95,6 +95,16 @@ def apply_diagnostic_rules(row: pd.Series) -> list[str]:
     if valve_effort_high and q_normal and not comfort_high:
         diagnoses.append("possible_compensated_hydraulic_restriction")
 
+    # 11. Stronger compensated restriction: high effort, low flow,
+    # but heat delivery and comfort are still acceptable.
+    if valve_effort_high and flow_low and q_normal and not comfort_high:
+        diagnoses.append("compensated_hydraulic_restriction_low_flow")
+
+    # 12. Degraded compensation: high effort and low flow with reduced heat,
+    # but comfort has not yet failed.
+    if valve_effort_high and flow_low and q_low and not comfort_high:
+        diagnoses.append("degraded_hydraulic_compensation")
+
     return diagnoses
 
 
