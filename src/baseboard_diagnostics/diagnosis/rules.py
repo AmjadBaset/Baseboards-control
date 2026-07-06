@@ -50,11 +50,16 @@ def apply_diagnostic_rules(row: pd.Series) -> list[str]:
     valve_effort_high = _has_label(row, "valve_effort_label", "high")
 
     # 1. Hydraulic delivery deficit
-    if flow_low and q_low:
+    # Low flow and low heat alone are not treated as a strong fault unless
+    # they are accompanied by comfort impact or high controller effort.
+    if flow_low and q_low and (comfort_high or valve_effort_high):
         diagnoses.append("hydraulic_delivery_deficit")
 
     # 2. Low-flow / high-deltaT hydraulic abnormality
-    if flow_low and dt_high:
+    # Low flow with high water-side deltaT can occur during stable operation.
+    # Treat it as a stronger hydraulic abnormality only if it affects comfort
+    # or requires high controller/valve effort.
+    if flow_low and dt_high and (comfort_high or valve_effort_high):
         diagnoses.append("hydraulic_abnormality_low_flow_high_deltaT")
 
     # 3. Hydraulic limitation with comfort impact
