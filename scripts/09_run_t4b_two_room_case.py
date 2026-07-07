@@ -129,19 +129,26 @@ def add_room_branch(
     outdoor_co2_schedule,
     r_out: float = 0.012,
     r_in: float = 0.012,
+    n_exterior_walls: int | None = None,
+    external_wall_net_area_per_floor_area: float | None = None,
+    external_wall_H_per_floor_area: float | None = None,
+    fault_type: str = "healthy",
+    layout_position: str | None = None,
     forced_valve_position_schedule=None,
 ):
+    area_scale = zone_area_m2 / 25.0
+
     room = tb.BuildingSpaceTorchSystem(
         thermal_kwargs={
-            "C_air": 1.0e6,
-            "C_wall": 2.0e6,
-            "C_int": 5.0e5,
+            "C_air": 1.0e6 * area_scale,
+            "C_wall": 2.0e6 * area_scale,
+            "C_int": 5.0e5 * area_scale,
             "R_out": r_out,
             "R_in": r_in,
             "R_int": 0.02,
             "f_wall": 0.2,
             "f_air": 0.05,
-            "Q_occ_gain": 100.0,
+            "Q_occ_gain": 100.0 * area_scale,
         },
         mass_kwargs={},
         id=f"room_{suffix}",
@@ -215,6 +222,12 @@ def add_room_branch(
         "valve": valve,
         "zone_area_m2": zone_area_m2,
         "valve_max_flow": valve_max_flow,
+        "n_exterior_walls": n_exterior_walls,
+        "external_wall_net_area_per_floor_area": external_wall_net_area_per_floor_area,
+        "external_wall_H_per_floor_area": external_wall_H_per_floor_area,
+        "exposure_group": f"{n_exterior_walls}_external_wall",
+        "fault_type": fault_type,
+        "layout_position": layout_position,
     }
 
 
@@ -246,55 +259,121 @@ def main():
     # the actuator remains partly open even if the controller would reduce demand.
     leakage_valve_position = make_schedule(model, "schedule_leakage_valve_position", 0.15)
 
-    normal = add_room_branch(
-        model=model,
-        suffix="normal",
-        valve_max_flow=NORMAL_VALVE_MAX_FLOW,
-        zone_area_m2=25.0,
-        t_out_schedule=t_out,
-        t_set_schedule=t_set,
-        t_supply_water_schedule=t_supply_water,
-        supply_air_temp_schedule=supply_air_temp,
-        air_flow_schedule=air_flow,
-        occupancy_schedule=occupancy,
-        solar_schedule=solar,
-        outdoor_co2_schedule=outdoor_co2,
-    )
+    # Stuck-open valve fault proxy:
+    # actuator remains partly open even if the controller would reduce demand.
+    stuck_open_valve_position = make_schedule(model, "schedule_stuck_open_valve_position", 0.045)
 
-    restricted = add_room_branch(
-        model=model,
-        suffix="restricted",
-        valve_max_flow=0.35 * NORMAL_VALVE_MAX_FLOW,
-        zone_area_m2=25.0,
-        t_out_schedule=t_out,
-        t_set_schedule=t_set,
-        t_supply_water_schedule=t_supply_water,
-        supply_air_temp_schedule=supply_air_temp,
-        air_flow_schedule=air_flow,
-        occupancy_schedule=occupancy,
-        solar_schedule=solar,
-        outdoor_co2_schedule=outdoor_co2,
-        r_out=0.012,
-        r_in=0.012,
-    )
+    def resistance_from_exposure(zone_area_m2: float, n_exterior_walls: int) -> tuple[float, float]:
+        """
+        Approximate resistance scaling:
+        2 external walls at 25 m²: R_out = R_in = 0.018
+        1 external wall at 25 m²: R_out = R_in = 0.036
 
-    leakage = add_room_branch(
-        model=model,
-        suffix="leakage",
-        valve_max_flow=NORMAL_VALVE_MAX_FLOW,
-        zone_area_m2=25.0,
-        t_out_schedule=t_out,
-        t_set_schedule=t_set,
-        t_supply_water_schedule=t_supply_water,
-        supply_air_temp_schedule=supply_air_temp,
-        air_flow_schedule=air_flow,
-        occupancy_schedule=occupancy,
-        solar_schedule=solar,
-        outdoor_co2_schedule=outdoor_co2,
-        r_out=0.018,
-        r_in=0.018,
-        forced_valve_position_schedule=leakage_valve_position,
-    )
+        Area scaling keeps heat-loss intensity comparable when room area changes.
+        """
+        base_r = 0.018 if n_exterior_walls == 2 else 0.036
+        area_scaled_r = base_r * (25.0 / zone_area_m2)
+        return area_scaled_r, area_scaled_r
+
+    def exposure_values(n_exterior_walls: int) -> tuple[float, float]:
+        """
+        Approximate OpenStudio exposure values:
+        2 external walls: H/A ≈ 0.45 W/K/m², net wall area/floor area ≈ 0.76
+        1 external wall: H/A ≈ 0.22 W/K/m², net wall area/floor area ≈ 0.38
+        """
+        if n_exterior_walls == 2:
+            return 0.76, 0.45
+        return 0.38, 0.22
+
+    room_cases = [
+        {
+            "suffix": "room_1",
+            "zone_area_m2": 20.0,
+            "n_exterior_walls": 2,
+            "fault_type": "healthy",
+            "layout_position": "top_left_corner",
+            "valve_max_flow_factor": 1.0,
+            "forced_valve_position_schedule": None,
+        },
+        {
+            "suffix": "room_2",
+            "zone_area_m2": 20.0,
+            "n_exterior_walls": 1,
+            "fault_type": "healthy",
+            "layout_position": "top_middle_edge",
+            "valve_max_flow_factor": 1.0,
+            "forced_valve_position_schedule": None,
+        },
+        {
+            "suffix": "room_3",
+            "zone_area_m2": 30.0,
+            "n_exterior_walls": 2,
+            "fault_type": "restricted_flow",
+            "layout_position": "top_right_corner",
+            "valve_max_flow_factor": 0.35,
+            "forced_valve_position_schedule": None,
+        },
+        {
+            "suffix": "room_4",
+            "zone_area_m2": 30.0,
+            "n_exterior_walls": 2,
+            "fault_type": "healthy",
+            "layout_position": "bottom_left_corner",
+            "valve_max_flow_factor": 1.0,
+            "forced_valve_position_schedule": None,
+        },
+        {
+            "suffix": "room_5",
+            "zone_area_m2": 15.0,
+            "n_exterior_walls": 1,
+            "fault_type": "stuck_open_valve",
+            "layout_position": "bottom_middle_edge",
+            "valve_max_flow_factor": 1.0,
+            "forced_valve_position_schedule": stuck_open_valve_position,
+        },
+        {
+            "suffix": "room_6",
+            "zone_area_m2": 15.0,
+            "n_exterior_walls": 2,
+            "fault_type": "healthy",
+            "layout_position": "bottom_right_corner",
+            "valve_max_flow_factor": 1.0,
+            "forced_valve_position_schedule": None,
+        },
+    ]
+
+    branches = []
+
+    for case in room_cases:
+        r_out, r_in = resistance_from_exposure(
+            case["zone_area_m2"],
+            case["n_exterior_walls"],
+        )
+        ext_area_per_area, h_per_area = exposure_values(case["n_exterior_walls"])
+
+        branch = add_room_branch(
+            model=model,
+            suffix=case["suffix"],
+            valve_max_flow=case["valve_max_flow_factor"] * NORMAL_VALVE_MAX_FLOW,
+            zone_area_m2=case["zone_area_m2"],
+            t_out_schedule=t_out,
+            t_set_schedule=t_set,
+            t_supply_water_schedule=t_supply_water,
+            supply_air_temp_schedule=supply_air_temp,
+            air_flow_schedule=air_flow,
+            occupancy_schedule=occupancy,
+            solar_schedule=solar,
+            outdoor_co2_schedule=outdoor_co2,
+            r_out=r_out,
+            r_in=r_in,
+            n_exterior_walls=case["n_exterior_walls"],
+            external_wall_net_area_per_floor_area=ext_area_per_area,
+            external_wall_H_per_floor_area=h_per_area,
+            fault_type=case["fault_type"],
+            layout_position=case["layout_position"],
+            forced_valve_position_schedule=case["forced_valve_position_schedule"],
+        )
+        branches.append(branch)
 
     model.load(draw_simulation_model=False)
 
@@ -308,7 +387,7 @@ def main():
     timestamps = pd.to_datetime(simulator.dateTimeSteps)
 
     rows = []
-    for branch in [normal, restricted, leakage]:
+    for branch in branches:
         room = branch["room"]
         heater = branch["heater"]
         controller = branch["controller"]
@@ -326,11 +405,17 @@ def main():
             {
                 "timestamp": timestamps,
                 "case_id": CASE_ID,
-                "archetype": "twin4build_l_shaped_three_room",
+                "archetype": "twin4build_3x2_six_room",
                 "construction_year": 1970,
                 "zone": f"ROOM_{branch['suffix'].upper()}",
                 "baseboard": f"BASEBOARD_{branch['suffix'].upper()}",
                 "zone_area_m2": branch["zone_area_m2"],
+                "n_exterior_walls": branch["n_exterior_walls"],
+                "external_wall_net_area_per_floor_area": branch["external_wall_net_area_per_floor_area"],
+                "external_wall_H_per_floor_area": branch["external_wall_H_per_floor_area"],
+                "exposure_group": branch["exposure_group"],
+                "fault_type": branch["fault_type"],
+                "layout_position": branch["layout_position"],
                 "T_out": winter_tout["T_out"].to_numpy()[:n],
                 "occupancy": 0.0,
                 "T_zone": T_zone[:n],
