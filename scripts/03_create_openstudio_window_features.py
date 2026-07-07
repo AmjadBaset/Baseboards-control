@@ -10,12 +10,12 @@ from baseboard_diagnostics.features.window_features import create_window_feature
 
 INPUT_PATH = Path(
     "data/processed/openstudio/apartment_1970/"
-    "apartment_baseboard_zone_timeseries_clean_area_new.csv"
+    "apartment_baseboard_zone_timeseries_clean_area_exposure_new.csv"
 )
 
 OUTPUT_PATH = Path(
     "data/processed/openstudio/apartment_1970/"
-    "apartment_baseboard_3h_window_features_area_tol_new.csv"
+    "apartment_baseboard_3h_window_features_area_exposure_new.csv"
 )
 
 

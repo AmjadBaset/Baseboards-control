@@ -10,12 +10,12 @@ from baseboard_diagnostics.bands.build_reference_bands import build_reference_ba
 
 INPUT_PATH = Path(
     "data/processed/openstudio/apartment_1970/"
-    "apartment_baseboard_3h_window_features_area_tol_new.csv"
+    "apartment_baseboard_3h_window_features_area_exposure_new.csv"
 )
 
 OUTPUT_PATH = Path(
     "data/reference_bands/openstudio/apartment_1970/"
-    "apartment_baseboard_reference_bands_area_normalized_new.csv"
+    "apartment_baseboard_reference_bands_area_exposure_new.csv"
 )
 
 

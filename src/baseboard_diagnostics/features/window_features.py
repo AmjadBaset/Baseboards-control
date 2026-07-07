@@ -137,6 +137,27 @@ def create_window_features(
                 "baseboard": keys[4],
                 "zone_area_m2": w["zone_area_m2"].iloc[0],
                 "n_timesteps": len(w),
+            }
+
+            # Carry static room/exposure metadata through to the window level
+            # when available. These columns allow exposure-aware reference
+            # matching without changing the timestep feature logic.
+            static_metadata_cols = [
+                "n_exterior_walls",
+                "exterior_wall_gross_area_m2",
+                "exterior_wall_net_area_m2",
+                "exterior_wall_H_with_film_W_per_K",
+                "external_wall_net_area_per_floor_area",
+                "external_wall_H_per_floor_area",
+                "exposure_group",
+                "orientations",
+            ]
+
+            for col in static_metadata_cols:
+                if col in w.columns:
+                    row[col] = w[col].iloc[0]
+
+            row.update({
                 "T_out_mean": w["T_out"].mean(),
                 "T_out_bin": w["T_out_bin"].mode().iloc[0] if not w["T_out_bin"].mode().empty else np.nan,
                 "period": w["period"].mode().iloc[0] if not w["period"].mode().empty else np.nan,
@@ -165,7 +186,7 @@ def create_window_features(
                 "m_dot_density_std": w["m_dot_density"].std(),
                 "flow_oscillation_index": _oscillation_index(w["m_dot"]),
                 "flow_density_oscillation_index": _oscillation_index(w["m_dot_density"]),
-            }
+            })
 
             if "normalized_flow_fraction" in w.columns:
                 row["normalized_flow_fraction_mean"] = w["normalized_flow_fraction"].mean()

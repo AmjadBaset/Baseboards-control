@@ -14,9 +14,8 @@ DEFAULT_GROUP_COLUMNS = [
     "case_id",
     "archetype",
     "construction_year",
-    "zone",
-    "baseboard",
     "zone_area_m2",
+    "exposure_group",
     "T_out_bin",
     "period",
 ]

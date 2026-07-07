@@ -35,7 +35,7 @@ RAW_INPUT_PATH = Path(
 
 BANDS_PATH = Path(
     "data/reference_bands/openstudio/apartment_1970/"
-    "apartment_baseboard_reference_bands_area_normalized_new.csv"
+    "apartment_baseboard_reference_bands_area_exposure_new.csv"
 )
 
 WINDOW_OUTPUT_PATH = Path(
@@ -73,6 +73,8 @@ SPECIAL_LABEL_MAP = {
 
 
 MATCH_LEVELS = [
+    ["construction_year", "zone_area_m2", "exposure_group", "T_out_bin", "period"],
+    ["construction_year", "exposure_group", "T_out_bin", "period"],
     ["construction_year", "zone_area_m2", "T_out_bin", "period"],
     ["construction_year", "T_out_bin", "period"],
     ["construction_year", "T_out_bin"],
