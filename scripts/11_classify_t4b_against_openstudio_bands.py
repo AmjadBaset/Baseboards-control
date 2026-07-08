@@ -117,13 +117,20 @@ def add_t4b_window_features(raw: pd.DataFrame) -> pd.DataFrame:
             if len(w) == 0:
                 continue
 
+            valve_position = w["valve_position"].astype(float)
+            valve_diff = valve_position.diff().dropna()
+
             row = {
                 "case_id": case_id,
                 "zone": zone,
                 "baseboard": baseboard,
                 "window_start": w["timestamp"].iloc[0],
-                "valve_position_mean": w["valve_position"].mean(),
-                "valve_position_max": w["valve_position"].max(),
+                "valve_position_mean": valve_position.mean(),
+                "valve_position_max": valve_position.max(),
+                "valve_position_min": valve_position.min(),
+                "valve_position_range": valve_position.max() - valve_position.min(),
+                "valve_position_std": valve_position.std(),
+                "valve_position_oscillation_index": valve_diff.abs().sum(),
                 "controller_signal_mean": w["controller_signal"].mean(),
                 "controller_signal_max": w["controller_signal"].max(),
             }
