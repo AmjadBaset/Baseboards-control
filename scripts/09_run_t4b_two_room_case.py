@@ -135,6 +135,7 @@ def add_room_branch(
     fault_type: str = "healthy",
     layout_position: str | None = None,
     forced_valve_position_schedule=None,
+    heat_loss_meta: dict | None = None,
 ):
     area_scale = zone_area_m2 / 25.0
 
@@ -228,6 +229,16 @@ def add_room_branch(
         "exposure_group": f"{n_exterior_walls}_external_wall",
         "fault_type": fault_type,
         "layout_position": layout_position,
+        "R_out_K_per_W": r_out,
+        "R_in_K_per_W": r_in,
+        "H_total_W_per_K": heat_loss_meta["H_total_W_per_K"],
+        "H_wall_W_per_K": heat_loss_meta["H_wall_W_per_K"],
+        "H_window_W_per_K": heat_loss_meta["H_window_W_per_K"],
+        "H_roof_W_per_K": heat_loss_meta["H_roof_W_per_K"],
+        "H_floor_W_per_K": heat_loss_meta["H_floor_W_per_K"],
+        "gross_external_wall_area_m2": heat_loss_meta["gross_external_wall_area_m2"],
+        "net_external_wall_area_m2": heat_loss_meta["net_external_wall_area_m2"],
+        "window_area_m2": heat_loss_meta["window_area_m2"],
     }
 
 
@@ -263,17 +274,86 @@ def main():
     # actuator remains partly open even if the controller would reduce demand.
     stuck_open_valve_position = make_schedule(model, "schedule_stuck_open_valve_position", 0.045)
 
-    def resistance_from_exposure(zone_area_m2: float, n_exterior_walls: int) -> tuple[float, float]:
-        """
-        Approximate resistance scaling:
-        2 external walls at 25 m²: R_out = R_in = 0.018
-        1 external wall at 25 m²: R_out = R_in = 0.036
+    # Building fabric U-values for the <1961 archetype [W/m2K].
+    # These are used to derive the aggregate room heat-loss coefficient H_total.
+    U_VALUES = {
+        "exterior_wall": 0.83,
+        "roof": 0.64,
+        "floor": 0.64,
+        "window": 5.03,
+    }
 
-        Area scaling keeps heat-loss intensity comparable when room area changes.
+    # Approximate geometry for the synthetic Twin4Build rooms.
+    # The earlier resistance values behaved approximately like:
+    # external walls + one horizontal exposed surface.
+    ROOM_HEIGHT_M = 2.5
+    WALL_LENGTH_PER_25M2_ROOM_M = 5.0
+    REFERENCE_ROOM_AREA_M2 = 25.0
+
+    def heat_loss_from_geometry(
+        zone_area_m2: float,
+        n_exterior_walls: int,
+        window_area_m2: float = 0.0,
+        has_roof: bool = False,
+        has_floor: bool = True,
+    ) -> dict[str, float]:
+        """Calculate aggregate room heat-loss coefficient H_total [W/K]."""
+        area_scale = (zone_area_m2 / REFERENCE_ROOM_AREA_M2) ** 0.5
+        wall_length = WALL_LENGTH_PER_25M2_ROOM_M * area_scale
+
+        gross_external_wall_area = n_exterior_walls * wall_length * ROOM_HEIGHT_M
+        net_external_wall_area = max(gross_external_wall_area - window_area_m2, 0.0)
+
+        h_wall = U_VALUES["exterior_wall"] * net_external_wall_area
+        h_window = U_VALUES["window"] * window_area_m2
+        h_roof = U_VALUES["roof"] * zone_area_m2 if has_roof else 0.0
+        h_floor = U_VALUES["floor"] * zone_area_m2 if has_floor else 0.0
+
+        h_total = h_wall + h_window + h_roof + h_floor
+
+        if h_total <= 0:
+            raise ValueError("H_total must be positive.")
+
+        return {
+            "H_total_W_per_K": h_total,
+            "H_wall_W_per_K": h_wall,
+            "H_window_W_per_K": h_window,
+            "H_roof_W_per_K": h_roof,
+            "H_floor_W_per_K": h_floor,
+            "gross_external_wall_area_m2": gross_external_wall_area,
+            "net_external_wall_area_m2": net_external_wall_area,
+            "window_area_m2": window_area_m2,
+        }
+
+    def resistance_from_exposure(
+        zone_area_m2: float,
+        n_exterior_walls: int,
+        window_area_m2: float = 0.0,
+        has_roof: bool = False,
+        has_floor: bool = True,
+    ) -> tuple[float, float, dict[str, float]]:
+        """Derive Twin4Build R_out and R_in from geometry and U-values.
+
+        Twin4Build uses:
+            indoor air <-> R_in <-> wall node <-> R_out <-> outdoor air
+
+        Therefore:
+            R_total = R_in + R_out = 1 / H_total
+
+        The total resistance is split equally between R_in and R_out.
         """
-        base_r = 0.018 if n_exterior_walls == 2 else 0.036
-        area_scaled_r = base_r * (25.0 / zone_area_m2)
-        return area_scaled_r, area_scaled_r
+        heat_loss_meta = heat_loss_from_geometry(
+            zone_area_m2=zone_area_m2,
+            n_exterior_walls=n_exterior_walls,
+            window_area_m2=window_area_m2,
+            has_roof=has_roof,
+            has_floor=has_floor,
+        )
+
+        r_total = 1.0 / heat_loss_meta["H_total_W_per_K"]
+        r_half = r_total / 2.0
+
+        return r_half, r_half, heat_loss_meta
 
     def exposure_values(n_exterior_walls: int) -> tuple[float, float]:
         """
@@ -290,64 +370,71 @@ def main():
             "suffix": "room_1",
             "zone_area_m2": 20.0,
             "n_exterior_walls": 2,
-            "fault_type": "healthy",
-            "layout_position": "top_left_corner",
             "valve_max_flow_factor": 1.0,
             "forced_valve_position_schedule": None,
+            "fault_type": "healthy",
+            "layout_position": "top_left_corner",
         },
         {
             "suffix": "room_2",
             "zone_area_m2": 20.0,
-            "n_exterior_walls": 1,
-            "fault_type": "healthy",
-            "layout_position": "top_middle_edge",
+            "n_exterior_walls": 2,
             "valve_max_flow_factor": 1.0,
             "forced_valve_position_schedule": None,
+            "fault_type": "healthy",
+            "layout_position": "bottom_left_corner",
         },
         {
             "suffix": "room_3",
             "zone_area_m2": 30.0,
-            "n_exterior_walls": 2,
-            "fault_type": "restricted_flow",
-            "layout_position": "top_right_corner",
+            "n_exterior_walls": 1,
             "valve_max_flow_factor": 0.35,
             "forced_valve_position_schedule": None,
+            "fault_type": "restricted_flow",
+            "layout_position": "top_middle_edge",
         },
         {
             "suffix": "room_4",
             "zone_area_m2": 30.0,
-            "n_exterior_walls": 2,
-            "fault_type": "healthy",
-            "layout_position": "bottom_left_corner",
+            "n_exterior_walls": 1,
             "valve_max_flow_factor": 1.0,
             "forced_valve_position_schedule": None,
+            "fault_type": "healthy",
+            "layout_position": "bottom_middle_edge",
         },
         {
             "suffix": "room_5",
             "zone_area_m2": 15.0,
-            "n_exterior_walls": 1,
-            "fault_type": "stuck_open_valve",
-            "layout_position": "bottom_middle_edge",
+            "n_exterior_walls": 2,
             "valve_max_flow_factor": 1.0,
             "forced_valve_position_schedule": stuck_open_valve_position,
+            "fault_type": "stuck_low_valve",
+            "layout_position": "top_right_corner",
         },
         {
             "suffix": "room_6",
             "zone_area_m2": 15.0,
             "n_exterior_walls": 2,
-            "fault_type": "healthy",
-            "layout_position": "bottom_right_corner",
             "valve_max_flow_factor": 1.0,
             "forced_valve_position_schedule": None,
+            "fault_type": "healthy",
+            "layout_position": "bottom_right_corner",
         },
     ]
 
     branches = []
 
     for case in room_cases:
-        r_out, r_in = resistance_from_exposure(
-            case["zone_area_m2"],
-            case["n_exterior_walls"],
+        # Danish BR18-inspired daylight simplification:
+        # assume glass/window area is 10% of room floor area.
+        window_area_m2 = case.get("window_area_m2", 0.10 * case["zone_area_m2"])
+
+        r_out, r_in, heat_loss_meta = resistance_from_exposure(
+            zone_area_m2=case["zone_area_m2"],
+            n_exterior_walls=case["n_exterior_walls"],
+            window_area_m2=window_area_m2,
+            has_roof=case.get("has_roof", False),
+            has_floor=case.get("has_floor", True),
         )
         ext_area_per_area, h_per_area = exposure_values(case["n_exterior_walls"])
 
@@ -372,6 +459,7 @@ def main():
             fault_type=case["fault_type"],
             layout_position=case["layout_position"],
             forced_valve_position_schedule=case["forced_valve_position_schedule"],
+            heat_loss_meta=heat_loss_meta,
         )
         branches.append(branch)
 
@@ -416,6 +504,16 @@ def main():
                 "exposure_group": branch["exposure_group"],
                 "fault_type": branch["fault_type"],
                 "layout_position": branch["layout_position"],
+                "R_out_K_per_W": branch.get("R_out_K_per_W"),
+                "R_in_K_per_W": branch.get("R_in_K_per_W"),
+                "H_total_W_per_K": branch.get("H_total_W_per_K"),
+                "H_wall_W_per_K": branch.get("H_wall_W_per_K"),
+                "H_window_W_per_K": branch.get("H_window_W_per_K"),
+                "H_roof_W_per_K": branch.get("H_roof_W_per_K"),
+                "H_floor_W_per_K": branch.get("H_floor_W_per_K"),
+                "gross_external_wall_area_m2": branch.get("gross_external_wall_area_m2"),
+                "net_external_wall_area_m2": branch.get("net_external_wall_area_m2"),
+                "window_area_m2": branch.get("window_area_m2"),
                 "T_out": winter_tout["T_out"].to_numpy()[:n],
                 "occupancy": 0.0,
                 "T_zone": T_zone[:n],

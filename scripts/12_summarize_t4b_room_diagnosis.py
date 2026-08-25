@@ -32,6 +32,10 @@ STUCK_OPEN_DIAGNOSES = [
     "possible_valve_leakage_or_stuck_open",
 ]
 
+STUCK_LOW_DIAGNOSES = [
+    "possible_partially_closed_or_stuck_low_valve",
+]
+
 HEAT_OUTPUT_DIAGNOSES = [
     "insufficient_heat_output",
     "insufficient_heat_output_despite_high_controller_effort",
@@ -115,6 +119,10 @@ def main() -> None:
             lambda x: has_diagnosis(x, STUCK_OPEN_DIAGNOSES)
         ).mean()
 
+        stuck_low_fraction = g["diagnosis_text"].apply(
+            lambda x: has_diagnosis(x, STUCK_LOW_DIAGNOSES)
+        ).mean()
+
         heat_output_fraction = g["diagnosis_text"].apply(
             lambda x: has_diagnosis(x, HEAT_OUTPUT_DIAGNOSES)
         ).mean()
@@ -125,7 +133,15 @@ def main() -> None:
 
         abnormal_fraction = 1.0 - normal_fraction
 
-        if stuck_open_fraction >= max(
+        if stuck_low_fraction >= max(
+            stuck_open_fraction,
+            restricted_fraction,
+            heat_output_fraction,
+            oversupply_fraction,
+        ):
+            dominant_fault_family = "stuck_low_valve"
+            dominant_fault_fraction = stuck_low_fraction
+        elif stuck_open_fraction >= max(
             restricted_fraction, heat_output_fraction, oversupply_fraction
         ):
             dominant_fault_family = "stuck_open_or_leakage"
@@ -144,6 +160,21 @@ def main() -> None:
             dominant_fault_family = "normal"
             dominant_fault_fraction = abnormal_fraction
 
+        comfort_violation = (
+            g["comfort_violation_fraction"].mean()
+            if "comfort_violation_fraction" in g.columns
+            else 0.0
+        )
+
+        if dominant_fault_family == "normal":
+            severity = "normal"
+        elif dominant_fault_family == "restricted_or_hydraulic" and comfort_violation < 0.05:
+            # Compensated hydraulic restriction: clear abnormal control/flow symptom,
+            # but comfort is still maintained.
+            severity = "warning"
+        else:
+            severity = severity_from_fraction(dominant_fault_fraction)
+
         row = {
             "zone": zone,
             "fault_type": fault_type,
@@ -156,9 +187,10 @@ def main() -> None:
             "abnormal_fraction": abnormal_fraction,
             "dominant_fault_family": dominant_fault_family,
             "dominant_fault_fraction": dominant_fault_fraction,
-            "severity": severity_from_fraction(dominant_fault_fraction),
+            "severity": severity,
             "restricted_or_hydraulic_fraction": restricted_fraction,
             "stuck_open_or_leakage_fraction": stuck_open_fraction,
+            "stuck_low_valve_fraction": stuck_low_fraction,
             "insufficient_heat_output_fraction": heat_output_fraction,
             "oversupply_or_overheating_fraction": oversupply_fraction,
         }

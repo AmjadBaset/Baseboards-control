@@ -74,12 +74,25 @@ def apply_diagnostic_rules(row: pd.Series) -> list[str]:
     if flow_low and dt_high and underheating_high:
         diagnoses.append("hydraulic_limitation_with_comfort_impact")
 
-    # 4. Insufficient heat output
+    # 4. Possible valve stuck at low / partially closed position
+    # The valve/control effort remains low while the room is underheated and
+    # heat delivery or flow is low. This indicates that the valve may be stuck
+    # near a closed position rather than responding to the heat demand.
+    if valve_effort_low and underheating_high:
+        diagnoses.append("possible_partially_closed_or_stuck_low_valve")
+
+    # 5. Insufficient heat output
     if q_low and underheating_high:
         diagnoses.append("insufficient_heat_output")
 
-    # 5. Possible emitter undersizing or high room load
-    if underheating_high and (q_normal or q_high) and (flow_normal or flow_high):
+    # 6. Possible emitter undersizing or high room load
+    # This should only be used when the controller/valve is not stuck low.
+    if (
+        underheating_high
+        and (q_normal or q_high)
+        and (flow_normal or flow_high)
+        and not valve_effort_low
+    ):
         diagnoses.append("possible_emitter_undersizing_or_high_load")
 
     # 6. Possible oversupply or overheating
@@ -98,6 +111,13 @@ def apply_diagnostic_rules(row: pd.Series) -> list[str]:
     # 9. Insufficient heat despite high controller effort
     if valve_effort_high and underheating_high and q_low:
         diagnoses.append("insufficient_heat_output_despite_high_controller_effort")
+
+    # 9b. Control saturation with unmet heat demand.
+    # The observed valve/control effort is high, but the room remains underheated
+    # and heat output is still low. This is a control-response inconsistency:
+    # the controller is asking for heat but cannot restore comfort.
+    if valve_effort_high and underheating_high and q_low:
+        diagnoses.append("control_saturation_with_unmet_heat_demand")
 
     # 10. Early/hidden restriction: controller compensates while comfort and heat are still normal
     if valve_effort_high and q_normal and not comfort_high:
