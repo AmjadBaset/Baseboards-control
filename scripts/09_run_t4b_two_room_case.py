@@ -422,6 +422,65 @@ def main():
         },
     ]
 
+    plan_geometry_by_suffix = {
+        # Schematic diagnostic plan coordinates.
+        # Coordinates are not used by Twin4Build physics; they are exported for reporting.
+        # Layout:
+        # ROOM_ROOM_1   ROOM_ROOM_3   ROOM_ROOM_5
+        # ROOM_ROOM_2   ROOM_ROOM_4   ROOM_ROOM_6
+        "room_1": {
+            "plan_x": 0.0,
+            "plan_y": 0.0,
+            "plan_w": 20.0,
+            "plan_h": 20.0,
+            "level_name": "Level 1",
+            "layout_source": "synthetic_case_metadata",
+        },
+        "room_2": {
+            "plan_x": 0.0,
+            "plan_y": 20.0,
+            "plan_w": 20.0,
+            "plan_h": 20.0,
+            "level_name": "Level 1",
+            "layout_source": "synthetic_case_metadata",
+        },
+        "room_3": {
+            "plan_x": 20.0,
+            "plan_y": 0.0,
+            "plan_w": 30.0,
+            "plan_h": 20.0,
+            "level_name": "Level 1",
+            "layout_source": "synthetic_case_metadata",
+        },
+        "room_4": {
+            "plan_x": 20.0,
+            "plan_y": 20.0,
+            "plan_w": 30.0,
+            "plan_h": 20.0,
+            "level_name": "Level 1",
+            "layout_source": "synthetic_case_metadata",
+        },
+        "room_5": {
+            "plan_x": 50.0,
+            "plan_y": 0.0,
+            "plan_w": 15.0,
+            "plan_h": 20.0,
+            "level_name": "Level 1",
+            "layout_source": "synthetic_case_metadata",
+        },
+        "room_6": {
+            "plan_x": 50.0,
+            "plan_y": 20.0,
+            "plan_w": 15.0,
+            "plan_h": 20.0,
+            "level_name": "Level 1",
+            "layout_source": "synthetic_case_metadata",
+        },
+    }
+
+    for case in room_cases:
+        case.update(plan_geometry_by_suffix[case["suffix"]])
+
     branches = []
 
     for case in room_cases:
@@ -461,6 +520,17 @@ def main():
             forced_valve_position_schedule=case["forced_valve_position_schedule"],
             heat_loss_meta=heat_loss_meta,
         )
+        # Report-geometry metadata. These coordinates are not used by the
+        # Twin4Build physics; they are exported for diagnostic plan rendering.
+        branch.update({
+            "plan_x": case["plan_x"],
+            "plan_y": case["plan_y"],
+            "plan_w": case["plan_w"],
+            "plan_h": case["plan_h"],
+            "level_name": case["level_name"],
+            "layout_source": case["layout_source"],
+        })
+
         branches.append(branch)
 
     model.load(draw_simulation_model=False)
@@ -504,6 +574,12 @@ def main():
                 "exposure_group": branch["exposure_group"],
                 "fault_type": branch["fault_type"],
                 "layout_position": branch["layout_position"],
+                "plan_x": branch.get("plan_x"),
+                "plan_y": branch.get("plan_y"),
+                "plan_w": branch.get("plan_w"),
+                "plan_h": branch.get("plan_h"),
+                "level_name": branch.get("level_name"),
+                "layout_source": branch.get("layout_source"),
                 "R_out_K_per_W": branch.get("R_out_K_per_W"),
                 "R_in_K_per_W": branch.get("R_in_K_per_W"),
                 "H_total_W_per_K": branch.get("H_total_W_per_K"),
