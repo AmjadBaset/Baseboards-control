@@ -287,12 +287,25 @@ def compute_room_energy(raw, diag, summary, window_hours_default):
         saving_low = max(0.0, actual_kWh - normal_high_kWh)
         saving_high = max(0.0, actual_kWh - normal_low_kWh)
 
-        if is_fault and comfort_percent >= 5.0:
+        mean_T_zone = float(r["T_zone"].mean()) if "T_zone" in r.columns else 21.0
+        comfort_setpoint = 21.0
+        comfort_tolerance = 0.5
+        comfort_lower = comfort_setpoint - comfort_tolerance
+        comfort_upper = comfort_setpoint + comfort_tolerance
+
+        is_overheated = mean_T_zone > comfort_upper
+        is_underheated = mean_T_zone < comfort_lower
+
+        if is_fault and comfort_percent >= 5.0 and is_underheated:
             deficit_low = max(0.0, normal_low_kWh - actual_kWh)
             deficit_high = max(0.0, normal_high_kWh - actual_kWh)
         else:
             deficit_low = 0.0
             deficit_high = 0.0
+
+        if not (is_fault and comfort_percent >= 5.0 and is_overheated):
+            saving_low = 0.0
+            saving_high = 0.0
 
         energy_saved = saving_high
         comfort_deficit = deficit_high
@@ -300,6 +313,8 @@ def compute_room_energy(raw, diag, summary, window_hours_default):
         if saving_high > 0:
             impact_type = "energy_waste_range"
         elif deficit_high > 0:
+            impact_type = "comfort_deficit_range"
+        elif is_underheated and comfort_percent >= 5.0:
             impact_type = "comfort_deficit_range"
         elif actual_kWh < normal_low_kWh:
             impact_type = "below_ref_no_comfort_issue"
@@ -420,6 +435,14 @@ def fmt_range(low, high, nd=1):
 
 
 def short_label(value):
+    if value is None:
+        return ""
+
+    value = str(value)
+    if value.endswith("_comfort_maintained"):
+        base = value.replace("_comfort_maintained", "")
+        return f"{short_label(base)}, comfort maintained"
+
     if value is None or pd.isna(value):
         return "—"
 
@@ -431,6 +454,9 @@ def short_label(value):
 
         "restricted_or_hydraulic": "Restricted or hydraulic",
         "stuck_low_valve": "Stuck low valve",
+        "stuck_valve": "Stuck valve",
+        "comfort_violation_without_matched_diagnostic_rule": "Comfort violation without matched diagnostic rule",
+        "comfort_violation_unclassified": "Comfort violation, unclassified",
 
         "compensated_hydraulic_restriction": "Compensated hydraulic restriction",
         "possible_compensated_hydraulic_restriction": "Possible compensated hydraulic restriction",

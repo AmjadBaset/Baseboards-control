@@ -17,6 +17,7 @@ Band matching uses sensible relaxation:
     5. construction_year
 """
 
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -29,29 +30,20 @@ from baseboard_diagnostics.diagnosis.rules import apply_rules_to_labeled_windows
 from baseboard_diagnostics.utils.io import write_csv
 
 
-RAW_INPUT_PATH = Path(
-    "data/raw/twin4build/two_room_restricted_flow/t4b_raw_timeseries.csv"
-)
+def paths(case_id: str) -> dict[str, Path]:
+    base_raw = Path(f"data/raw/twin4build/{case_id}")
+    base_processed = Path(f"data/processed/twin4build/{case_id}")
 
-BANDS_PATH = Path(
-    "data/reference_bands/openstudio/apartment_1970/"
-    "apartment_baseboard_reference_bands_area_exposure_new.csv"
-)
-
-WINDOW_OUTPUT_PATH = Path(
-    "data/processed/twin4build/two_room_restricted_flow/"
-    "t4b_3h_window_features.csv"
-)
-
-LABELED_OUTPUT_PATH = Path(
-    "data/processed/twin4build/two_room_restricted_flow/"
-    "t4b_3h_windows_labeled_against_openstudio.csv"
-)
-
-DIAGNOSED_OUTPUT_PATH = Path(
-    "data/processed/twin4build/two_room_restricted_flow/"
-    "t4b_3h_windows_diagnosed_against_openstudio.csv"
-)
+    return {
+        "raw": base_raw / "t4b_raw_timeseries.csv",
+        "bands": Path(
+            "data/reference_bands/openstudio/apartment_1970/"
+            "apartment_baseboard_reference_bands_area_exposure_new.csv"
+        ),
+        "features": base_processed / "t4b_3h_window_features.csv",
+        "labeled": base_processed / "t4b_3h_windows_labeled_against_openstudio.csv",
+        "diagnosed": base_processed / "t4b_3h_windows_diagnosed_against_openstudio.csv",
+    }
 
 
 NORMAL_FEATURES = [
@@ -254,24 +246,40 @@ def classify_with_relaxed_bands(windows: pd.DataFrame, bands: pd.DataFrame) -> p
     return classified
 
 
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--case-id", default="two_room_restricted_flow")
+    return parser.parse_args()
+
+
 def main():
-    raw = pd.read_csv(RAW_INPUT_PATH)
-    bands = pd.read_csv(BANDS_PATH)
+    args = parse_args()
+    p = paths(args.case_id)
+
+    args = parse_args()
+    case_id = args.case_id
+
+    raw_path = Path(f"data/raw/twin4build/{case_id}/t4b_raw_timeseries.csv")
+    out_path = Path(f"data/processed/twin4build/{case_id}/t4b_3h_windows_diagnosed_against_openstudio.csv")
+
+    raw = pd.read_csv(p["raw"])
+    bands = pd.read_csv(p["bands"])
 
     windows = add_t4b_window_features(raw)
-    write_csv(windows, WINDOW_OUTPUT_PATH)
+    write_csv(windows, p["features"])
 
     labeled = classify_with_relaxed_bands(windows, bands)
-    write_csv(labeled, LABELED_OUTPUT_PATH)
+    write_csv(labeled, p["labeled"])
 
     diagnosed = apply_rules_to_labeled_windows(labeled)
-    write_csv(diagnosed, DIAGNOSED_OUTPUT_PATH)
+    write_csv(diagnosed, p["diagnosed"])
 
-    print("Raw input:", RAW_INPUT_PATH)
-    print("Bands:", BANDS_PATH)
-    print("Window output:", WINDOW_OUTPUT_PATH)
-    print("Labeled output:", LABELED_OUTPUT_PATH)
-    print("Diagnosed output:", DIAGNOSED_OUTPUT_PATH)
+    print("Raw input:", p["raw"])
+    print("Bands:", p["bands"])
+    print("Window output:", p["features"])
+    print("Labeled output:", p["labeled"])
+    print("Diagnosed output:", p["diagnosed"])
     print()
 
     print("Match levels:")

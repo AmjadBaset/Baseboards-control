@@ -20,14 +20,28 @@ def _has_label(row: pd.Series, label_col: str, expected: str) -> bool:
     return row[label_col] == expected
 
 
+def _get_float(row: pd.Series, col: str, default=None):
+    """
+    Safely read a numeric feature from one diagnostic window.
+    """
+    if col not in row:
+        return default
+    value = row[col]
+    if pd.isna(value):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def apply_diagnostic_rules(row: pd.Series) -> list[str]:
     """
     Apply diagnostic rules to one labeled window.
 
-    Returns a list of diagnosis strings. A window can have more than one
-    diagnosis if several rule conditions are true.
+    Diagnostic rules must use only observed features and labels.
+    Ground-truth injected fault labels are not used here.
     """
-
     diagnoses = []
 
     q_low = _has_label(row, "Q_density_mean_label", "low")
@@ -39,12 +53,27 @@ def apply_diagnostic_rules(row: pd.Series) -> list[str]:
     flow_normal = _has_label(row, "m_dot_density_mean_label", "normal")
 
     dt_high = _has_label(row, "deltaT_water_mean_label", "high")
-    comfort_high = _has_label(row, "comfort_violation_fraction_label", "high")
-    overheating_high = _has_label(row, "overheating_fraction_label", "high")
 
-    # Comfort violation can mean either underheating or overheating.
-    # Heat-deficit rules should only use underheating-like violations.
-    underheating_high = comfort_high and not overheating_high
+    comfort_fraction = _get_float(row, "comfort_violation_fraction", 0.0)
+    overheating_fraction = _get_float(row, "overheating_fraction", 0.0)
+    underheating_mean = _get_float(row, "underheating_mean", 0.0)
+    overheating_mean = _get_float(row, "overheating_mean", 0.0)
+
+    comfort_high = (
+        _has_label(row, "comfort_violation_fraction_label", "high")
+        or comfort_fraction >= 0.05
+    )
+
+    overheating_high = (
+        _has_label(row, "overheating_fraction_label", "high")
+        or overheating_fraction >= 0.05
+        or overheating_mean > 0.05
+    )
+
+    underheating_high = (
+        comfort_high
+        and not overheating_high
+    ) or underheating_mean > 0.05
 
     oscillation_high = _has_label(
         row,
@@ -52,92 +81,139 @@ def apply_diagnostic_rules(row: pd.Series) -> list[str]:
         "high",
     )
 
-    # In real-building deployment, valve position is treated as a proxy
-    # for observed control effort.
     valve_effort_low = _has_label(row, "valve_effort_label", "low")
     valve_effort_high = _has_label(row, "valve_effort_label", "high")
 
-    # 1. Hydraulic delivery deficit
-    # Low flow and low heat alone are not treated as a strong fault unless
-    # they are accompanied by comfort impact or high controller effort.
-    if flow_low and q_low and (underheating_high or valve_effort_high):
+    valve_mean = _get_float(row, "valve_position_mean", None)
+    if valve_mean is None:
+        valve_mean = _get_float(row, "controller_signal_mean", None)
+
+    valve_std = _get_float(row, "valve_position_std", None)
+    valve_range = _get_float(row, "valve_position_range", None)
+
+    valve_high = (
+        valve_effort_high
+        or (valve_mean is not None and valve_mean >= 0.70)
+    )
+
+    valve_low = (
+        valve_effort_low
+        or (valve_mean is not None and valve_mean <= 0.25)
+    )
+
+    valve_fixed = (
+        (valve_std is not None and valve_std <= 0.02)
+        or (valve_range is not None and valve_range <= 0.05)
+    )
+
+    # 1. Stuck-open / leakage behavior.
+    # Overheating plus an open/fixed valve should be treated as possible
+    # stuck-open/leakage before falling back to generic oversupply.
+    stuck_open_evidence = (
+        overheating_high
+        and (
+            valve_effort_low
+            or valve_high
+            or (valve_fixed and valve_mean is not None and valve_mean >= 0.50)
+        )
+    )
+
+    if stuck_open_evidence:
+        diagnoses.append("possible_valve_leakage_or_stuck_open")
+
+    # 2. Generic oversupply / overheating.
+    # Use only when overheating exists but stuck-open/leakage evidence is weak.
+    elif overheating_high:
+        diagnoses.append("possible_oversupply_or_overheating")
+
+    # 3. Hydraulic delivery deficit.
+    # Do not classify overheated rooms as hydraulic restrictions.
+    if (
+        not overheating_high
+        and flow_low
+        and q_low
+        and (underheating_high or valve_high)
+    ):
         diagnoses.append("hydraulic_delivery_deficit")
 
-    # 2. Low-flow / high-deltaT hydraulic abnormality
-    # Low flow with high water-side deltaT can occur during stable operation.
-    # Treat it as a stronger hydraulic abnormality only if it affects comfort
-    # or requires high controller/valve effort.
-    if flow_low and dt_high and (underheating_high or valve_effort_high):
+    # 4. Low-flow / high-deltaT hydraulic abnormality.
+    if (
+        not overheating_high
+        and flow_low
+        and dt_high
+        and (underheating_high or valve_high)
+    ):
         diagnoses.append("hydraulic_abnormality_low_flow_high_deltaT")
 
-    # 3. Hydraulic limitation with comfort impact
-    if flow_low and dt_high and underheating_high:
+    # 5. Hydraulic limitation with comfort impact.
+    # High valve effort with underheating is a failed compensation pattern.
+    if (
+        not overheating_high
+        and underheating_high
+        and (
+            flow_low
+            or dt_high
+            or valve_high
+        )
+    ):
         diagnoses.append("hydraulic_limitation_with_comfort_impact")
 
-    # 4. Possible valve stuck at low / partially closed position
-    # The valve/control effort remains low while the room is underheated and
-    # heat delivery or flow is low. This indicates that the valve may be stuck
-    # near a closed position rather than responding to the heat demand.
-    if valve_effort_low and underheating_high:
+    # 6. Possible valve stuck low / partially closed.
+    if (
+        not overheating_high
+        and underheating_high
+        and (
+            valve_low
+            or (valve_fixed and valve_mean is not None and valve_mean <= 0.40)
+        )
+    ):
         diagnoses.append("possible_partially_closed_or_stuck_low_valve")
 
-    # 5. Insufficient heat output
-    if q_low and underheating_high:
+    # 7. Insufficient heat output.
+    if not overheating_high and q_low and underheating_high:
         diagnoses.append("insufficient_heat_output")
 
-    # 6. Possible emitter undersizing or high room load
-    # This should only be used when the controller/valve is not stuck low.
+    # 8. Possible emitter undersizing or high room load.
     if (
-        underheating_high
+        not overheating_high
+        and underheating_high
         and (q_normal or q_high)
         and (flow_normal or flow_high)
-        and not valve_effort_low
+        and not valve_low
     ):
         diagnoses.append("possible_emitter_undersizing_or_high_load")
 
-    # 6. Possible oversupply or overheating
-    if overheating_high and q_high:
-        diagnoses.append("possible_oversupply_or_overheating")
-
-    # 7. Possible control/hydraulic oscillation
-    # This is kept as a weak rule. It should later be fused with controller ID.
+    # 9. Possible flow/control instability.
     if oscillation_high and not comfort_high:
         diagnoses.append("possible_flow_or_control_instability")
 
-    # 8. Hydraulic delivery deficit with controller compensation
-    if valve_effort_high and flow_low and q_low:
+    # 10. Hydraulic delivery deficit with controller compensation.
+    if not overheating_high and valve_high and flow_low and q_low:
         diagnoses.append("hydraulic_delivery_deficit_with_controller_compensation")
 
-    # 9. Insufficient heat despite high controller effort
-    if valve_effort_high and underheating_high and q_low:
+    # 11. Insufficient heat despite high controller effort.
+    if not overheating_high and valve_high and underheating_high and q_low:
         diagnoses.append("insufficient_heat_output_despite_high_controller_effort")
-
-    # 9b. Control saturation with unmet heat demand.
-    # The observed valve/control effort is high, but the room remains underheated
-    # and heat output is still low. This is a control-response inconsistency:
-    # the controller is asking for heat but cannot restore comfort.
-    if valve_effort_high and underheating_high and q_low:
         diagnoses.append("control_saturation_with_unmet_heat_demand")
 
-    # 10. Early/hidden restriction: controller compensates while comfort and heat are still normal
-    if valve_effort_high and q_normal and not comfort_high:
+    # 12. Compensated hydraulic restriction.
+    # High valve effort, but comfort is still maintained.
+    if not comfort_high and not overheating_high and valve_high and q_normal:
         diagnoses.append("possible_compensated_hydraulic_restriction")
 
-    # 11. Stronger compensated restriction: high effort, low flow,
-    # but heat delivery and comfort are still acceptable.
-    if valve_effort_high and flow_low and q_normal and not comfort_high:
+    # 13. Stronger compensated restriction: high effort + low flow.
+    if not comfort_high and not overheating_high and valve_high and flow_low and q_normal:
         diagnoses.append("compensated_hydraulic_restriction_low_flow")
 
-    # 12. Degraded compensation: high effort and low flow with reduced heat,
+    # 14. Degraded compensation: high effort + low flow + reduced heat,
     # but comfort has not yet failed.
-    if valve_effort_high and flow_low and q_low and not comfort_high:
+    if not comfort_high and not overheating_high and valve_high and flow_low and q_low:
         diagnoses.append("degraded_hydraulic_compensation")
 
-    # 13. Possible valve leakage or stuck-open behavior.
-    # If the room overheats while observed control effort is low, the emitter
-    # may be receiving heat when the controller is not demanding it.
-    if valve_effort_low and overheating_high:
-        diagnoses.append("possible_valve_leakage_or_stuck_open")
+    # 15. Last fallback.
+    # Comfort is violated but no physical diagnostic rule explains it.
+    if comfort_high and not diagnoses:
+        diagnoses.append("comfort_violation_without_matched_diagnostic_rule")
 
     return diagnoses
 
