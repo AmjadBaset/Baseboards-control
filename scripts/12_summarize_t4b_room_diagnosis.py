@@ -111,6 +111,28 @@ def severity_from_comfort_violation(comfort_violation: float) -> str:
     return "normal"
 
 
+def final_room_severity(comfort_violation: float, main_diagnosis: str) -> str:
+    """
+    Final room severity.
+
+    A room with a non-normal diagnosis is at least a warning even if comfort is
+    currently maintained. This captures early/compensated faults.
+    """
+    base_severity = severity_from_comfort_violation(comfort_violation)
+
+    if base_severity in {"fault", "warning"}:
+        return base_severity
+
+    if main_diagnosis not in {
+        NORMAL_DIAGNOSIS,
+        "normal",
+        "normal_or_no_rule_triggered",
+    }:
+        return "warning"
+
+    return "normal"
+
+
 def parse_diagnosis_text(value) -> list[str]:
     """
     Convert diagnosis_text / diagnoses cell into a clean list of diagnosis strings.
@@ -265,13 +287,14 @@ def summarize_room(zone: str, g: pd.DataFrame, raw_meta_row: dict | None) -> dic
     n = len(g)
 
     comfort_violation = float(g["comfort_violation_fraction"].mean())
-    severity = severity_from_comfort_violation(comfort_violation)
+    comfort_based_severity = severity_from_comfort_violation(comfort_violation)
 
     fractions = diagnosis_fractions(g)
     main_diagnosis, main_diagnosis_fraction = choose_main_diagnosis(
         fractions,
-        severity,
+        comfort_based_severity,
     )
+    severity = final_room_severity(comfort_violation, main_diagnosis)
     dominant_fault_family = family_from_diagnosis(main_diagnosis)
 
     if main_diagnosis == NORMAL_DIAGNOSIS:
