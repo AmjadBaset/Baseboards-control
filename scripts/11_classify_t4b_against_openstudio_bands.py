@@ -1,20 +1,15 @@
 """
-Classify Twin4Build two-room diagnostic windows against OpenStudio reference bands.
+Classify Twin4Build diagnostic windows against context-matched healthy bands.
 
-Special comparison:
-    Twin4Build valve_position_mean
-    is compared against
-    OpenStudio normalized_flow_fraction_mean_P10/P90
+The diagnostic pipeline intentionally does not use controller command signals.
+Measured valve position is summarized only to characterize valve movement and
+persistent limited-travel behaviour. Measured valve position is also
+classified relative to the context-matched healthy normalized-flow-fraction
+band to obtain a relative valve-effort label. This comparison is used only as
+supporting evidence; no absolute valve-opening threshold is used.
 
-This creates:
-    valve_effort_label = low / normal / high
-
-Band matching uses sensible relaxation:
-    1. construction_year + zone_area_m2 + T_out_bin + period
-    2. construction_year + T_out_bin + period
-    3. construction_year + T_out_bin
-    4. construction_year + period
-    5. construction_year
+Injected fault metadata and valve maximum-flow fault parameters are not used as
+diagnostic inputs.
 """
 
 import argparse
@@ -30,6 +25,14 @@ from baseboard_diagnostics.diagnosis.rules import apply_rules_to_labeled_windows
 from baseboard_diagnostics.utils.io import write_csv
 
 
+WINDOW = "3h"
+TIMESTEP_MINUTES = 15
+SAMPLES_PER_WINDOW = int(
+    pd.Timedelta(WINDOW)
+    / pd.Timedelta(minutes=TIMESTEP_MINUTES)
+)
+
+
 def paths(case_id: str) -> dict[str, Path]:
     base_raw = Path(f"data/raw/twin4build/{case_id}")
     base_processed = Path(f"data/processed/twin4build/{case_id}")
@@ -41,8 +44,14 @@ def paths(case_id: str) -> dict[str, Path]:
             "apartment_baseboard_reference_bands_area_exposure_new.csv"
         ),
         "features": base_processed / "t4b_3h_window_features.csv",
-        "labeled": base_processed / "t4b_3h_windows_labeled_against_openstudio.csv",
-        "diagnosed": base_processed / "t4b_3h_windows_diagnosed_against_openstudio.csv",
+        "labeled": (
+            base_processed
+            / "t4b_3h_windows_labeled_against_openstudio.csv"
+        ),
+        "diagnosed": (
+            base_processed
+            / "t4b_3h_windows_diagnosed_against_openstudio.csv"
+        ),
     }
 
 
@@ -55,34 +64,60 @@ NORMAL_FEATURES = [
     "flow_density_oscillation_index",
 ]
 
-SPECIAL_FEATURE_MAP = {
-    "valve_position_mean": "normalized_flow_fraction_mean",
-}
 
-SPECIAL_LABEL_MAP = {
-    "valve_position_mean": "valve_effort_label",
-}
+RELATIVE_VALVE_EFFORT_FEATURE = "valve_position_mean"
+RELATIVE_VALVE_EFFORT_REFERENCE = "normalized_flow_fraction_mean"
+RELATIVE_VALVE_EFFORT_LABEL = "relative_valve_effort_label"
 
 
 MATCH_LEVELS = [
-    ["construction_year", "zone_area_m2", "exposure_group", "T_out_bin", "period"],
-    ["construction_year", "exposure_group", "T_out_bin", "period"],
-    ["construction_year", "zone_area_m2", "T_out_bin", "period"],
-    ["construction_year", "T_out_bin", "period"],
-    ["construction_year", "T_out_bin"],
-    ["construction_year", "period"],
-    ["construction_year"],
+    [
+        "construction_year",
+        "zone_area_m2",
+        "exposure_group",
+        "T_out_bin",
+        "period",
+    ],
+    [
+        "construction_year",
+        "exposure_group",
+        "T_out_bin",
+        "period",
+    ],
+    [
+        "construction_year",
+        "zone_area_m2",
+        "T_out_bin",
+        "period",
+    ],
+    [
+        "construction_year",
+        "T_out_bin",
+        "period",
+    ],
+    [
+        "construction_year",
+        "T_out_bin",
+    ],
+    [
+        "construction_year",
+        "period",
+    ],
+    [
+        "construction_year",
+    ],
 ]
 
 
-def add_t4b_window_features(raw: pd.DataFrame) -> pd.DataFrame:
+def add_t4b_window_features(
+    raw: pd.DataFrame,
+) -> pd.DataFrame:
     df = raw.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-    # For Twin4Build, m_dot_design is the known valve maximum flow.
-    # This allows normalized_flow_fraction to be computed consistently.
-    if "valve_max_flow" in df.columns:
-        df["m_dot_design"] = df["valve_max_flow"]
+    # Do NOT derive m_dot_design from valve_max_flow here.
+    # In fault-injection cases valve_max_flow can be the parameter used to
+    # create a restriction and therefore must not leak into diagnosis.
 
     df = add_timestep_features(
         df,
@@ -93,23 +128,39 @@ def add_t4b_window_features(raw: pd.DataFrame) -> pd.DataFrame:
 
     windows = create_window_features(
         df,
-        window="3h",
+        window=WINDOW,
         heating_active_fraction_threshold=0.25,
     )
 
-    # Add Twin4Build controller/valve window features.
+    # Valve-position features are optional. The remaining diagnostic rules
+    # continue to work if valve position is unavailable, but specific valve
+    # fault identification will then be less specific.
+    if "valve_position" not in df.columns:
+        return windows
+
     extra_rows = []
 
-    for keys, g in df.groupby(["case_id", "zone", "baseboard"], dropna=False):
+    for keys, g in df.groupby(
+        ["case_id", "zone", "baseboard"],
+        dropna=False,
+    ):
         case_id, zone, baseboard = keys
         g = g.sort_values("timestamp").copy()
-        g["window_id"] = np.arange(len(g)) // 12
+        g["window_id"] = (
+            np.arange(len(g))
+            // SAMPLES_PER_WINDOW
+        )
 
         for _, w in g.groupby("window_id"):
-            if len(w) == 0:
+            # Keep valve statistics aligned with the complete windows retained
+            # by create_window_features().
+            if len(w) != SAMPLES_PER_WINDOW:
                 continue
 
-            valve_position = w["valve_position"].astype(float)
+            valve_position = pd.to_numeric(
+                w["valve_position"],
+                errors="coerce",
+            )
             valve_diff = valve_position.diff().dropna()
 
             row = {
@@ -120,65 +171,110 @@ def add_t4b_window_features(raw: pd.DataFrame) -> pd.DataFrame:
                 "valve_position_mean": valve_position.mean(),
                 "valve_position_max": valve_position.max(),
                 "valve_position_min": valve_position.min(),
-                "valve_position_range": valve_position.max() - valve_position.min(),
+                "valve_position_range": (
+                    valve_position.max()
+                    - valve_position.min()
+                ),
                 "valve_position_std": valve_position.std(),
-                "valve_position_oscillation_index": valve_diff.abs().sum(),
-                "controller_signal_mean": w["controller_signal"].mean(),
-                "controller_signal_max": w["controller_signal"].max(),
+                "valve_position_oscillation_index": (
+                    valve_diff.abs().sum()
+                ),
             }
             extra_rows.append(row)
 
+    if not extra_rows:
+        return windows
+
     extra = pd.DataFrame(extra_rows)
 
-    windows["window_start"] = pd.to_datetime(windows["window_start"])
-    extra["window_start"] = pd.to_datetime(extra["window_start"])
+    windows["window_start"] = pd.to_datetime(
+        windows["window_start"]
+    )
+    extra["window_start"] = pd.to_datetime(
+        extra["window_start"]
+    )
 
     windows = windows.merge(
         extra,
-        on=["case_id", "zone", "baseboard", "window_start"],
+        on=[
+            "case_id",
+            "zone",
+            "baseboard",
+            "window_start",
+        ],
         how="left",
     )
 
     return windows
 
 
-def summarize_bands_for_match_level(bands: pd.DataFrame, match_cols: list[str]) -> pd.DataFrame:
+def summarize_bands_for_match_level(
+    bands: pd.DataFrame,
+    match_cols: list[str],
+) -> pd.DataFrame:
     """
-    Collapse OpenStudio reference bands for a relaxed match level.
+    Collapse healthy reference bands for a relaxed match level.
 
-    If zone/baseboard are relaxed away, multiple OpenStudio rows may match.
-    We aggregate P10/P90 conservatively using medians across matching bands.
+    If room-specific context is relaxed away, several healthy groups may match.
+    P10/P50/P90 columns are aggregated using the median across those groups.
     """
     band_value_cols = [
-        col for col in bands.columns
-        if col.endswith("_P10") or col.endswith("_P50") or col.endswith("_P90")
+        col
+        for col in bands.columns
+        if (
+            col.endswith("_P10")
+            or col.endswith("_P50")
+            or col.endswith("_P90")
+        )
     ]
 
     return (
         bands
-        .groupby(match_cols, dropna=False)[band_value_cols]
+        .groupby(
+            match_cols,
+            dropna=False,
+        )[band_value_cols]
         .median()
         .reset_index()
     )
 
 
-def classify_with_relaxed_bands(windows: pd.DataFrame, bands: pd.DataFrame) -> pd.DataFrame:
+def classify_with_relaxed_bands(
+    windows: pd.DataFrame,
+    bands: pd.DataFrame,
+) -> pd.DataFrame:
     remaining = windows.copy()
-    remaining["_original_index"] = np.arange(len(remaining))
+    remaining["_original_index"] = np.arange(
+        len(remaining)
+    )
     remaining["_match_level"] = pd.NA
 
     classified_parts = []
 
-    for i, match_cols in enumerate(MATCH_LEVELS, start=1):
+    for i, match_cols in enumerate(
+        MATCH_LEVELS,
+        start=1,
+    ):
         if remaining.empty:
             break
 
-        missing_window = [c for c in match_cols if c not in remaining.columns]
-        missing_bands = [c for c in match_cols if c not in bands.columns]
+        missing_window = [
+            c
+            for c in match_cols
+            if c not in remaining.columns
+        ]
+        missing_bands = [
+            c
+            for c in match_cols
+            if c not in bands.columns
+        ]
         if missing_window or missing_bands:
             continue
 
-        relaxed_bands = summarize_bands_for_match_level(bands, match_cols)
+        relaxed_bands = summarize_bands_for_match_level(
+            bands,
+            match_cols,
+        )
 
         merged = remaining.merge(
             relaxed_bands,
@@ -188,20 +284,38 @@ def classify_with_relaxed_bands(windows: pd.DataFrame, bands: pd.DataFrame) -> p
             indicator=True,
         )
 
-        matched = merged[merged["_merge"] == "both"].copy()
-        unmatched = merged[merged["_merge"] == "left_only"].copy()
+        matched = merged[
+            merged["_merge"] == "both"
+        ].copy()
+        unmatched = merged[
+            merged["_merge"] == "left_only"
+        ].copy()
 
         if not matched.empty:
             matched["_match_level"] = i
-            matched["_match_columns"] = " + ".join(match_cols)
-            classified_parts.append(matched.drop(columns=["_merge"]))
+            matched["_match_columns"] = (
+                " + ".join(match_cols)
+            )
+            classified_parts.append(
+                matched.drop(columns=["_merge"])
+            )
 
-        # Keep only original window columns for the next relaxed attempt.
-        original_cols = list(windows.columns) + ["_original_index", "_match_level"]
-        remaining = unmatched[original_cols].copy()
+        original_cols = (
+            list(windows.columns)
+            + [
+                "_original_index",
+                "_match_level",
+            ]
+        )
+        remaining = unmatched[
+            original_cols
+        ].copy()
 
     if remaining.empty:
-        classified = pd.concat(classified_parts, ignore_index=True)
+        classified = pd.concat(
+            classified_parts,
+            ignore_index=True,
+        )
     else:
         remaining["_match_level"] = "unmatched"
         remaining["_match_columns"] = "none"
@@ -210,46 +324,68 @@ def classify_with_relaxed_bands(windows: pd.DataFrame, bands: pd.DataFrame) -> p
             ignore_index=True,
         )
 
-    # Normal same-name feature classifications.
     for feature in NORMAL_FEATURES:
         p10_col = f"{feature}_P10"
         p90_col = f"{feature}_P90"
         label_col = f"{feature}_label"
 
-        if feature in classified.columns and p10_col in classified.columns and p90_col in classified.columns:
+        if (
+            feature in classified.columns
+            and p10_col in classified.columns
+            and p90_col in classified.columns
+        ):
             classified[label_col] = classified.apply(
-                lambda row: classify_value(row[feature], row[p10_col], row[p90_col]),
+                lambda row: classify_value(
+                    row[feature],
+                    row[p10_col],
+                    row[p90_col],
+                ),
                 axis=1,
             )
         else:
             classified[label_col] = "missing"
 
-    # Special mapped classification:
-    # valve_position_mean vs normalized_flow_fraction_mean_P10/P90.
-    feature = "valve_position_mean"
-    band_feature = SPECIAL_FEATURE_MAP[feature]
-    label_col = SPECIAL_LABEL_MAP[feature]
+    # Context-relative valve effort:
+    # compare measured valve position (0-1) with the healthy
+    # normalized-flow-fraction P10/P90 band for the matched operating context.
+    # This is a supporting effort proxy, not an absolute valve-opening rule.
+    valve_feature = RELATIVE_VALVE_EFFORT_FEATURE
+    reference_feature = RELATIVE_VALVE_EFFORT_REFERENCE
 
-    p10_col = f"{band_feature}_P10"
-    p90_col = f"{band_feature}_P90"
+    valve_p10_col = f"{reference_feature}_P10"
+    valve_p90_col = f"{reference_feature}_P90"
 
-    if feature in classified.columns and p10_col in classified.columns and p90_col in classified.columns:
-        classified[label_col] = classified.apply(
-            lambda row: classify_value(row[feature], row[p10_col], row[p90_col]),
+    if (
+        valve_feature in classified.columns
+        and valve_p10_col in classified.columns
+        and valve_p90_col in classified.columns
+    ):
+        classified[RELATIVE_VALVE_EFFORT_LABEL] = classified.apply(
+            lambda row: classify_value(
+                row[valve_feature],
+                row[valve_p10_col],
+                row[valve_p90_col],
+            ),
             axis=1,
         )
     else:
-        classified[label_col] = "missing"
+        classified[RELATIVE_VALVE_EFFORT_LABEL] = "missing"
 
-    classified = classified.sort_values("_original_index").drop(columns=["_original_index"])
+    classified = (
+        classified
+        .sort_values("_original_index")
+        .drop(columns=["_original_index"])
+    )
 
     return classified
 
 
-
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--case-id", default="two_room_restricted_flow")
+    parser.add_argument(
+        "--case-id",
+        default="two_room_restricted_flow",
+    )
     return parser.parse_args()
 
 
@@ -257,23 +393,31 @@ def main():
     args = parse_args()
     p = paths(args.case_id)
 
-    args = parse_args()
-    case_id = args.case_id
-
-    raw_path = Path(f"data/raw/twin4build/{case_id}/t4b_raw_timeseries.csv")
-    out_path = Path(f"data/processed/twin4build/{case_id}/t4b_3h_windows_diagnosed_against_openstudio.csv")
-
     raw = pd.read_csv(p["raw"])
     bands = pd.read_csv(p["bands"])
 
     windows = add_t4b_window_features(raw)
-    write_csv(windows, p["features"])
+    write_csv(
+        windows,
+        p["features"],
+    )
 
-    labeled = classify_with_relaxed_bands(windows, bands)
-    write_csv(labeled, p["labeled"])
+    labeled = classify_with_relaxed_bands(
+        windows,
+        bands,
+    )
+    write_csv(
+        labeled,
+        p["labeled"],
+    )
 
-    diagnosed = apply_rules_to_labeled_windows(labeled)
-    write_csv(diagnosed, p["diagnosed"])
+    diagnosed = apply_rules_to_labeled_windows(
+        labeled
+    )
+    write_csv(
+        diagnosed,
+        p["diagnosed"],
+    )
 
     print("Raw input:", p["raw"])
     print("Bands:", p["bands"])
@@ -283,28 +427,56 @@ def main():
     print()
 
     print("Match levels:")
-    print(labeled["_match_columns"].value_counts(dropna=False))
+    print(
+        labeled["_match_columns"]
+        .value_counts(dropna=False)
+    )
     print()
 
-    print("Valve effort labels:")
-    print(labeled.groupby("zone")["valve_effort_label"].value_counts(dropna=False))
+    print("Relative valve effort labels:")
+    if RELATIVE_VALVE_EFFORT_LABEL in labeled.columns:
+        print(
+            labeled
+            .groupby("zone")[RELATIVE_VALVE_EFFORT_LABEL]
+            .value_counts(dropna=False)
+        )
     print()
 
     print("Diagnosis counts:")
-    print(diagnosed.groupby("zone")["diagnosis_text"].value_counts(dropna=False))
+    print(
+        diagnosed
+        .groupby("zone")["diagnosis_text"]
+        .value_counts(dropna=False)
+    )
     print()
 
     summary_cols = [
         "valve_position_mean",
+        "valve_position_range",
+        "normalized_flow_fraction_mean_P10",
+        "normalized_flow_fraction_mean_P50",
         "normalized_flow_fraction_mean_P90",
         "Q_density_mean",
         "m_dot_density_mean",
+        "deltaT_water_mean",
         "comfort_violation_fraction",
+        "overheating_fraction",
     ]
 
-    available_summary_cols = [c for c in summary_cols if c in diagnosed.columns]
+    available_summary_cols = [
+        c
+        for c in summary_cols
+        if c in diagnosed.columns
+    ]
+
     print("Summary:")
-    print(diagnosed.groupby("zone")[available_summary_cols].mean())
+    print(
+        diagnosed
+        .groupby("zone")[
+            available_summary_cols
+        ]
+        .mean()
+    )
 
 
 if __name__ == "__main__":
