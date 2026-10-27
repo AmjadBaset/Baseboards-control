@@ -33,6 +33,7 @@ truth is stored separately and should be merged only during evaluation.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import datetime as dt
 import json
 import math
@@ -124,13 +125,16 @@ CLOSING_LIMIT_QUANTILE_RANGES = {
 
 # Fixed-valve positions. These are injection ranges, not diagnostic thresholds.
 # A fixed actuator is sampled from either a lower or higher part of its travel.
-FIXED_VALVE_POSITION_RANGES = {
-    ("low", "mild"): (0.30, 0.45),
+# Fixed-valve positions, like travel limits, must be room-relative.
+# A position of 0.4 can be an unusually HIGH opening for one room,
+# even though an absolute 0.4 would previously be tagged as "low".
+FIXED_VALVE_QUANTILE_RANGES = {
+    ("low", "mild"): (0.35, 0.45),
     ("low", "moderate"): (0.15, 0.30),
     ("low", "severe"): (0.05, 0.15),
-    ("high", "mild"): (0.45, 0.60),
-    ("high", "moderate"): (0.60, 0.75),
-    ("high", "severe"): (0.75, 0.90),
+    ("high", "mild"): (0.55, 0.65),
+    ("high", "moderate"): (0.70, 0.85),
+    ("high", "severe"): (0.85, 0.95),
 }
 
 FAULT_MECHANISMS = [
@@ -197,6 +201,7 @@ class ValveFaultInjectorSystem(core.System, nn.Module):
         mode: str = "healthy",
         fault_start_step: int | None = None,
         fixed_position: float | None = None,
+        fixed_position_quantile: float | None = None,
         upper_limit: float | None = None,
         lower_limit: float | None = None,
         limit_quantile: float | None = None,
@@ -212,6 +217,9 @@ class ValveFaultInjectorSystem(core.System, nn.Module):
             else 10**12
         )
         self.fixed_position = fixed_position
+        self.fixed_position_quantile = fixed_position_quantile
+        if self.fixed_position_quantile is not None and not 0.0 <= self.fixed_position_quantile <= 1.0:
+            raise ValueError("fixed_position_quantile must be in [0, 1].")
         self.upper_limit = upper_limit
         self.lower_limit = lower_limit
         self.limit_quantile = limit_quantile
@@ -222,6 +230,7 @@ class ValveFaultInjectorSystem(core.System, nn.Module):
         self._pre_fault_requested: list[float] = []
         self.binding_count = 0
         self.post_fault_step_count = 0
+        self.absolute_position_change_sum = 0.0
 
         self.input = {"requestedValvePosition": tps.Scalar()}
         self.output = {"actualValvePosition": tps.Scalar(0)}
@@ -236,6 +245,12 @@ class ValveFaultInjectorSystem(core.System, nn.Module):
         if self.post_fault_step_count <= 0:
             return float("nan")
         return self.binding_count / self.post_fault_step_count
+
+    @property
+    def mean_absolute_position_change(self) -> float:
+        if self.post_fault_step_count <= 0:
+            return float("nan")
+        return self.absolute_position_change_sum / self.post_fault_step_count
 
     def initialize(self, start_time, end_time, step_size, simulator):
         self.input["requestedValvePosition"].initialize(
@@ -263,17 +278,13 @@ class ValveFaultInjectorSystem(core.System, nn.Module):
     def _scalar_float(value: torch.Tensor) -> float:
         return float(value.detach().cpu().reshape(-1)[0].item())
 
-    def _resolve_limited_travel(self, requested_value: float) -> float:
-        if self.limit_quantile is None:
-            raise ValueError(
-                f"{self.mode} requires either a fixed limit or limit_quantile."
-            )
-
-        history = self._pre_fault_requested
-        if not history:
-            history = [requested_value]
-
-        limit = float(np.quantile(np.asarray(history, dtype=float), self.limit_quantile))
+    def _resolve_from_healthy_request(
+        self, requested_value: float, quantile: float | None
+    ) -> float:
+        if quantile is None:
+            raise ValueError(f"{self.mode} requires a configured position quantile.")
+        history = self._pre_fault_requested or [requested_value]
+        limit = float(np.quantile(np.asarray(history, dtype=float), quantile))
         return float(np.clip(limit, 0.0, 1.0))
 
     def do_step(self, secondTime, dateTime, step_size, stepIndex):
@@ -285,7 +296,7 @@ class ValveFaultInjectorSystem(core.System, nn.Module):
         requested_value = self._scalar_float(requested)
 
         if stepIndex < self.fault_start_step:
-            if self.mode in {"limited_opening", "limited_closing"}:
+            if self.mode in {"limited_opening", "limited_closing", "fixed_valve"}:
                 self._pre_fault_requested.append(requested_value)
             actual = requested
 
@@ -297,19 +308,23 @@ class ValveFaultInjectorSystem(core.System, nn.Module):
             binding = False
 
             if self.mode == "fixed_valve":
+                if self.fixed_position is None:
+                    self.fixed_position = self._resolve_from_healthy_request(
+                        requested_value, self.fixed_position_quantile
+                    )
                 actual = self._constant_like(requested, float(self.fixed_position))
                 binding = abs(requested_value - float(self.fixed_position)) > 1e-9
 
             elif self.mode == "limited_opening":
                 if self.upper_limit is None:
-                    self.upper_limit = self._resolve_limited_travel(requested_value)
+                    self.upper_limit = self._resolve_from_healthy_request(requested_value, self.limit_quantile)
                 limit = self._constant_like(requested, float(self.upper_limit))
                 actual = torch.minimum(requested, limit)
                 binding = requested_value > float(self.upper_limit) + 1e-9
 
             elif self.mode == "limited_closing":
                 if self.lower_limit is None:
-                    self.lower_limit = self._resolve_limited_travel(requested_value)
+                    self.lower_limit = self._resolve_from_healthy_request(requested_value, self.limit_quantile)
                 limit = self._constant_like(requested, float(self.lower_limit))
                 actual = torch.maximum(requested, limit)
                 binding = requested_value < float(self.lower_limit) - 1e-9
@@ -317,6 +332,9 @@ class ValveFaultInjectorSystem(core.System, nn.Module):
             else:
                 raise ValueError(f"Unsupported valve fault mode: {self.mode}")
 
+            self.absolute_position_change_sum += abs(
+                requested_value - self._scalar_float(actual)
+            )
             if binding:
                 self.binding_count += 1
 
@@ -722,6 +740,7 @@ def choose_fault_assignment(
         "fault_start_step": fault_start_step,
         "restriction_factor": 1.0,
         "fixed_valve_position": None,
+        "fixed_valve_quantile": None,
         "valve_upper_limit": None,
         "valve_lower_limit": None,
         "valve_limit_quantile": None,
@@ -734,8 +753,8 @@ def choose_fault_assignment(
 
     elif mechanism == "fixed_valve":
         regime = rng.choice(["low", "high"])
-        lo, hi = FIXED_VALVE_POSITION_RANGES[(regime, severity)]
-        spec["fixed_valve_position"] = rng.uniform(lo, hi)
+        lo, hi = FIXED_VALVE_QUANTILE_RANGES[(regime, severity)]
+        spec["fixed_valve_quantile"] = rng.uniform(lo, hi)
         spec["fixed_valve_regime"] = regime
 
     elif mechanism == "limited_opening":
@@ -831,6 +850,7 @@ def add_room_branch(
         ),
         fault_start_step=case["fault_start_step"],
         fixed_position=case["fixed_valve_position"],
+        fixed_position_quantile=case["fixed_valve_quantile"],
         upper_limit=case["valve_upper_limit"],
         lower_limit=case["valve_lower_limit"],
         limit_quantile=case["valve_limit_quantile"],
@@ -991,9 +1011,15 @@ def main() -> None:
     simulation_manifest_path = case_dir / "simulation_manifest.json"
     input_schedule_path = case_dir / "simulation_inputs.csv"
 
-    if operational_path.exists() and not args.overwrite:
+    existing_outputs = [
+        p for p in (operational_path, truth_path, building_manifest_path,
+                  simulation_manifest_path, input_schedule_path) if p.exists()
+    ]
+    if existing_outputs and not args.overwrite:
         raise FileExistsError(
-            f"{operational_path} already exists. Use --overwrite to replace it."
+            f"Existing case outputs: {existing_outputs}. "
+            "Choose a NEW --case-id for each generator revision; "
+            "use --overwrite only if intentional."
         )
 
     case_dir.mkdir(parents=True, exist_ok=True)
@@ -1107,6 +1133,7 @@ def main() -> None:
                     "fault_start": None,
                     "restriction_factor": 1.0,
                     "fixed_valve_position": None,
+                    "fixed_valve_quantile": None,
                     "fixed_valve_regime": None,
                     "valve_upper_limit": None,
                     "valve_lower_limit": None,
@@ -1236,6 +1263,9 @@ def main() -> None:
         }:
             branch["valve_binding_fraction"] = float(valve_fault.binding_fraction)
             branch["valve_binding_count"] = int(valve_fault.binding_count)
+            branch["valve_mean_absolute_position_change"] = float(
+                valve_fault.mean_absolute_position_change
+            )
             branch["valve_post_fault_step_count"] = int(
                 valve_fault.post_fault_step_count
             )
@@ -1243,10 +1273,13 @@ def main() -> None:
         else:
             branch["valve_binding_fraction"] = np.nan
             branch["valve_binding_count"] = np.nan
+            branch["valve_mean_absolute_position_change"] = np.nan
             branch["valve_post_fault_step_count"] = np.nan
             branch["valve_fault_activated"] = np.nan
 
-        if branch["fault_type"] == "limited_opening":
+        if branch["fault_type"] == "fixed_valve":
+            branch["fixed_valve_position"] = valve_fault.fixed_position
+        elif branch["fault_type"] == "limited_opening":
             branch["valve_upper_limit"] = valve_fault.upper_limit
         elif branch["fault_type"] == "limited_closing":
             branch["valve_lower_limit"] = valve_fault.lower_limit
@@ -1334,11 +1367,13 @@ def main() -> None:
         "fault_start_step",
         "restriction_factor",
         "fixed_valve_position",
+        "fixed_valve_quantile",
         "fixed_valve_regime",
         "valve_upper_limit",
         "valve_lower_limit",
         "valve_limit_quantile",
         "valve_binding_fraction",
+        "valve_mean_absolute_position_change",
         "valve_binding_count",
         "valve_post_fault_step_count",
         "valve_fault_activated",
@@ -1404,8 +1439,13 @@ def main() -> None:
         "fault_onset_fraction_range": list(FAULT_ONSET_FRACTION_RANGE),
         "restriction_factor_ranges": RESTRICTION_FACTOR_RANGES,
         "opening_limit_quantile_ranges": OPENING_LIMIT_QUANTILE_RANGES,
+        "fixed_valve_quantile_ranges": {
+            f"{regime}_{severity}": list(bounds)
+            for (regime, severity), bounds in FIXED_VALVE_QUANTILE_RANGES.items()
+        },
         "closing_limit_quantile_ranges": CLOSING_LIMIT_QUANTILE_RANGES,
         "limited_travel_reference": "room-specific pre-fault requested-valve quantiles",
+        "fixed_valve_reference": "room-specific pre-fault requested-valve quantiles",
         "valve_authority_range": list(VALVE_AUTHORITY_RANGE),
         "emitter_sizing_margin_range": list(EMITTER_SIZING_MARGIN_RANGE),
         "design_outdoor_quantile": DESIGN_OUTDOOR_QUANTILE,
@@ -1413,6 +1453,8 @@ def main() -> None:
         "same_floor_plan_on_all_levels": True,
         "operational_file_contains_ground_truth": False,
         "controller_command_exported": False,
+        "generator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "validation_schema": "FDD_validation_candidate_v3",
     }
     with simulation_manifest_path.open("w", encoding="utf-8") as f:
         json.dump(simulation_manifest, f, indent=2)

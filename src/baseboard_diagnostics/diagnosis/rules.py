@@ -11,8 +11,6 @@ Ground-truth injected fault labels are never used by the diagnostic rules.
 
 from __future__ import annotations
 
-import math
-
 import pandas as pd
 
 
@@ -390,296 +388,104 @@ def apply_diagnostic_rules(row: pd.Series) -> list[str]:
     return diagnoses
 
 
-def _apply_persistent_valve_travel_rules(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
+# Use a trailing history only. Never use post-detection windows to decide
+# whether an earlier window had a persistent travel limit.
+VALVE_TRAVEL_LOOKBACK_WINDOWS = 8
+VALVE_TRAVEL_TOLERANCE = 0.025
+
+
+def _apply_persistent_valve_travel_rules(df: pd.DataFrame) -> pd.DataFrame:
+    """Causal, observational (not ground-truth-driven) valve-travel evidence.
+
+    A non-endpoint ceiling/floor is flagged only once at least three recent
+    *symptomatic* windows have repeatedly reached a consistent extremum.
+    Neither controller requests nor injected limit parameters are available.
+    Findings remain *possible* valve faults, not uniquely proved mechanisms.
+    Only the current window is updated; older windows are never relabeled.
     """
-    Add temporal limited-travel valve evidence.
-
-    Two behaviours are checked across repeated diagnostic windows:
-
-    - Limited opening / stuck-low-like behaviour:
-      underheating + low delivery while a moving valve repeatedly reaches a
-      similar maximum below the physical fully-open endpoint.
-
-    - Limited closing / stuck-open-like behaviour:
-      overheating + continued delivery while a moving valve repeatedly reaches
-      a similar minimum above the physical fully-closed endpoint.
-
-    This supplements the single-window fixed-valve rules without introducing an
-    arbitrary absolute boundary such as 0.40 or 0.50 valve opening.
-    """
-    required_columns = {
-        "valve_position_min",
-        "valve_position_max",
-        "valve_position_range",
+    required = {
+        "valve_position_min", "valve_position_max", "valve_position_range",
+        "window_start",
     }
-    if not required_columns.issubset(
-        df.columns
-    ):
+    if not required.issubset(df.columns):
         return df
-
-    group_cols = [
-        col
-        for col in [
-            "case_id",
-            "zone",
-            "baseboard",
-        ]
-        if col in df.columns
-    ]
+    group_cols = [c for c in ("case_id", "zone", "baseboard") if c in df]
     if not group_cols:
         return df
 
-    for _, g in df.groupby(
-        group_cols,
-        dropna=False,
-    ):
-        n_windows = len(g)
-        required_count = max(
-            MIN_PERSISTENT_LIMIT_WINDOWS,
-            int(
-                math.ceil(
-                    MIN_PERSISTENT_LIMIT_FRACTION
-                    * n_windows
-                )
-            ),
-        )
+    for _, group in df.groupby(group_cols, dropna=False, sort=False):
+        g = group.sort_values("window_start", kind="stable")
+        heat_comfort = _numeric_series(g, "comfort_violation_fraction")
+        over_fraction = _numeric_series(g, "overheating_fraction")
+        under_mean = _numeric_series(g, "underheating_mean")
+        over_mean = _numeric_series(g, "overheating_mean")
+        comfort_bad = (_label_mask(g, "comfort_violation_fraction_label", "high")
+                       | (heat_comfort >= 0.05))
+        over_bad = (_label_mask(g, "overheating_fraction_label", "high")
+                    | (over_fraction >= 0.05) | (over_mean > 0.05))
+        under_bad = ((comfort_bad & ~over_bad) | (under_mean > 0.05)) & ~over_bad
+        q_valid = (_label_mask(g, "Q_density_mean_label", "low") |
+                   _label_mask(g, "Q_density_mean_label", "normal") |
+                   _label_mask(g, "Q_density_mean_label", "high"))
+        flow_valid = (_label_mask(g, "m_dot_density_mean_label", "low") |
+                      _label_mask(g, "m_dot_density_mean_label", "normal") |
+                      _label_mask(g, "m_dot_density_mean_label", "high"))
+        delivery = (_label_mask(g, "Q_density_mean_label", "normal") |
+                    _label_mask(g, "Q_density_mean_label", "high") |
+                    _label_mask(g, "m_dot_density_mean_label", "normal") |
+                    _label_mask(g, "m_dot_density_mean_label", "high"))
+        # A stationary valve is allowed: a real hard travel stop can leave the
+        # position perfectly flat throughout a three-hour diagnostic window.
+        max_pos = pd.to_numeric(g["valve_position_max"], errors="coerce")
+        min_pos = pd.to_numeric(g["valve_position_min"], errors="coerce")
+        span = pd.to_numeric(g["valve_position_range"], errors="coerce")
+        sensor_ok = max_pos.between(0.0, 1.0) & min_pos.between(0.0, 1.0) & span.ge(0)
+        max_candidates = under_bad & sensor_ok & (q_valid | flow_valid)
+        min_candidates = over_bad & delivery & sensor_ok
 
-        comfort_fraction = _numeric_series(
-            g,
-            "comfort_violation_fraction",
-            0.0,
-        )
-        overheating_fraction = _numeric_series(
-            g,
-            "overheating_fraction",
-            0.0,
-        )
-        underheating_mean = _numeric_series(
-            g,
-            "underheating_mean",
-            0.0,
-        )
-        overheating_mean = _numeric_series(
-            g,
-            "overheating_mean",
-            0.0,
-        )
-
-        comfort_high = (
-            _label_mask(
-                g,
-                "comfort_violation_fraction_label",
-                "high",
-            )
-            | (comfort_fraction >= 0.05)
-        )
-
-        overheating_high = (
-            _label_mask(
-                g,
-                "overheating_fraction_label",
-                "high",
-            )
-            | (overheating_fraction >= 0.05)
-            | (overheating_mean > 0.05)
-        )
-
-        underheating_high = (
-            (comfort_high & ~overheating_high)
-            | (underheating_mean > 0.05)
-        )
-
-        q_low = _label_mask(
-            g,
-            "Q_density_mean_label",
-            "low",
-        )
-        q_normal = _label_mask(
-            g,
-            "Q_density_mean_label",
-            "normal",
-        )
-        q_high = _label_mask(
-            g,
-            "Q_density_mean_label",
-            "high",
-        )
-
-        flow_low = _label_mask(
-            g,
-            "m_dot_density_mean_label",
-            "low",
-        )
-        flow_normal = _label_mask(
-            g,
-            "m_dot_density_mean_label",
-            "normal",
-        )
-        flow_high = _label_mask(
-            g,
-            "m_dot_density_mean_label",
-            "high",
-        )
-
-        valve_range = _numeric_series(
-            g,
-            "valve_position_range",
-            0.0,
-        )
-
-        # Limited-travel evidence is only needed where the valve actually moves.
-        # Fixed/near-fixed cases are already handled window by window.
-        moving_valve = (
-            valve_range
-            > VALVE_FIXED_RANGE_THRESHOLD
-        )
-
-        low_delivery = (
-            q_low
-            | flow_low
-        )
-        continued_delivery = (
-            q_normal
-            | q_high
-            | flow_normal
-            | flow_high
-        )
-
-        # --------------------------------------------------------------
-        # Persistent upper ceiling -> limited opening / stuck-low
-        # --------------------------------------------------------------
-        low_candidates = (
-            underheating_high
-            & ~overheating_high
-            & moving_valve
-        )
-
-        upper_values = pd.to_numeric(
-            g.loc[
-                low_candidates,
-                "valve_position_max",
-            ],
-            errors="coerce",
-        ).dropna()
-
-        if len(upper_values) >= required_count:
-            upper_center = float(
-                upper_values.median()
-            )
-            upper_iqr = float(
-                upper_values.quantile(0.75)
-                - upper_values.quantile(0.25)
-            )
-
-            upper_support = upper_values[
+        for pos, current_index in enumerate(g.index):
+            begin = max(0, pos + 1 - VALVE_TRAVEL_LOOKBACK_WINDOWS)
+            recent_idx = g.index[begin:pos + 1]
+            for kind, candidates, values, target, superseded in (
                 (
-                    upper_values
-                    - upper_center
-                ).abs()
-                <= VALVE_TRAVEL_TOLERANCE
-            ]
-
-            internal_upper_limit = (
-                upper_center
-                < (
-                    1.0
-                    - VALVE_ENDPOINT_TOLERANCE
-                )
-            )
-
-            if (
-                internal_upper_limit
-                and upper_iqr
-                <= VALVE_TRAVEL_TOLERANCE
-                and len(upper_support)
-                >= required_count
-            ):
-                _append_diagnosis(
-                    df,
-                    upper_support.index,
-                    (
-                        "possible_partially_closed_"
-                        "or_stuck_low_valve"
-                    ),
-                )
-                _remove_diagnoses(
-                    df,
-                    upper_support.index,
-                    {
-                        "hydraulic_restriction_with_comfort_impact",
-                        "insufficient_heat_output",
-                        "possible_emitter_undersizing_or_high_load",
-                    },
-                )
-
-        # --------------------------------------------------------------
-        # Persistent lower floor -> limited closing / stuck-open
-        # --------------------------------------------------------------
-        open_candidates = (
-            overheating_high
-            & continued_delivery
-            & moving_valve
-        )
-
-        lower_values = pd.to_numeric(
-            g.loc[
-                open_candidates,
-                "valve_position_min",
-            ],
-            errors="coerce",
-        ).dropna()
-
-        if len(lower_values) >= required_count:
-            lower_center = float(
-                lower_values.median()
-            )
-            lower_iqr = float(
-                lower_values.quantile(0.75)
-                - lower_values.quantile(0.25)
-            )
-
-            lower_support = lower_values[
+                    "upper", max_candidates, max_pos,
+                    "possible_partially_closed_or_stuck_low_valve",
+                    {"hydraulic_restriction_with_comfort_impact",
+                     "insufficient_heat_output",
+                     "possible_emitter_undersizing_or_high_load",
+                     "comfort_violation_without_matched_diagnostic_rule"},
+                ),
                 (
-                    lower_values
-                    - lower_center
-                ).abs()
-                <= VALVE_TRAVEL_TOLERANCE
-            ]
-
-            internal_lower_limit = (
-                lower_center
-                > VALVE_ENDPOINT_TOLERANCE
-            )
-
-            if (
-                internal_lower_limit
-                and lower_iqr
-                <= VALVE_TRAVEL_TOLERANCE
-                and len(lower_support)
-                >= required_count
+                    "lower", min_candidates, min_pos,
+                    "possible_valve_leakage_or_stuck_open",
+                    {"possible_excessive_heating_capacity_or_oversupply",
+                     "possible_oversupply_or_overheating",
+                     "possible_nonhydronic_or_unexplained_overheating",
+                     "comfort_violation_without_matched_diagnostic_rule"},
+                ),
             ):
-                _append_diagnosis(
-                    df,
-                    lower_support.index,
-                    (
-                        "possible_valve_leakage_"
-                        "or_stuck_open"
-                    ),
-                )
-                _remove_diagnoses(
-                    df,
-                    lower_support.index,
-                    {
-                        "possible_excessive_heating_capacity_or_oversupply",
-                        "possible_oversupply_or_overheating",
-                        "possible_nonhydronic_or_unexplained_overheating",
-                    },
-                )
+                if not bool(candidates.loc[current_index]):
+                    continue
+                recent = values.loc[recent_idx][candidates.loc[recent_idx]].dropna()
+                if len(recent) < MIN_PERSISTENT_LIMIT_WINDOWS:
+                    continue
+                center = float(recent.median())
+                if kind == "upper" and center >= 1 - VALVE_ENDPOINT_TOLERANCE:
+                    continue
+                if kind == "lower" and center <= VALVE_ENDPOINT_TOLERANCE:
+                    continue
+                if not VALVE_ENDPOINT_TOLERANCE < center < 1 - VALVE_ENDPOINT_TOLERANCE:
+                    continue
+                support = recent[(recent - center).abs() <= VALVE_TRAVEL_TOLERANCE]
+                if (len(support) < MIN_PERSISTENT_LIMIT_WINDOWS
+                    or abs(float(values.loc[current_index]) - center) > VALVE_TRAVEL_TOLERANCE):
+                    continue
+                # At least three consistent *observed* internal extrema support
+                # the candidate. A flat valve alone is never sufficient.
+                _append_diagnosis(df, [current_index], target)
+                _remove_diagnoses(df, [current_index], superseded)
 
     return df
-
 
 def apply_rules_to_labeled_windows(
     labeled_windows: pd.DataFrame,

@@ -109,9 +109,51 @@ MATCH_LEVELS = [
 ]
 
 
+FORBIDDEN_OPERATIONAL_COLUMNS = {
+    "fault_type", "fault_severity", "fault_start", "fault_start_step",
+    "restriction_factor", "fixed_valve_position", "fixed_valve_quantile",
+    "fixed_valve_regime", "valve_upper_limit", "valve_lower_limit",
+    "valve_limit_quantile", "valve_binding_fraction", "valve_binding_count",
+    "valve_mean_absolute_position_change", "valve_post_fault_step_count",
+    "valve_fault_activated", "controller_signal", "valve_max_flow",
+    "healthy_valve_max_flow_kg_s",
+}
+
+
+def validate_blind_raw(raw: pd.DataFrame) -> None:
+    forbidden = sorted(FORBIDDEN_OPERATIONAL_COLUMNS.intersection(raw.columns))
+    if forbidden:
+        raise ValueError(
+            "Operational CSV contains injected-fault/controller information: "
+            f"{forbidden}. Use blind simulation output only."
+        )
+    required = {"timestamp", "case_id", "zone", "baseboard"}
+    missing = sorted(required.difference(raw.columns))
+    if missing:
+        raise ValueError(f"Missing operational columns: {missing}")
+    timestamps = pd.to_datetime(raw["timestamp"], utc=True, errors="raise")
+    if timestamps.isna().any():
+        raise ValueError("Operational CSV has null timestamps.")
+    keys = raw[["case_id", "zone", "baseboard"]].copy()
+    keys["timestamp"] = timestamps
+    if keys.duplicated().any():
+        raise ValueError("Duplicate timestamps within a case/zone/baseboard.")
+    # Windowing relies on 15-minute samples with no gaps. Otherwise its
+    # position-based groups would silently span more than 3 hours.
+    keys = keys.sort_values(["case_id", "zone", "baseboard", "timestamp"])
+    delta = keys.groupby(["case_id", "zone", "baseboard"])["timestamp"].diff()
+    bad = delta.notna() & delta.ne(pd.Timedelta(minutes=TIMESTEP_MINUTES))
+    if bad.any():
+        raise ValueError(
+            f"Expected continuous {TIMESTEP_MINUTES}-minute samples. "
+            f"Found {int(bad.sum())} missing/irregular steps."
+        )
+
+
 def add_t4b_window_features(
     raw: pd.DataFrame,
 ) -> pd.DataFrame:
+    validate_blind_raw(raw)
     df = raw.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
 
@@ -203,7 +245,10 @@ def add_t4b_window_features(
             "window_start",
         ],
         how="left",
+        validate="one_to_one",
     )
+    if windows["valve_position_mean"].isna().any():
+        raise ValueError("Valve-window alignment failed: unmatched window rows.")
 
     return windows
 
@@ -324,6 +369,13 @@ def classify_with_relaxed_bands(
             ignore_index=True,
         )
 
+    n_unmatched = int(classified["_match_level"].eq("unmatched").sum())
+    if n_unmatched:
+        raise ValueError(
+            f"{n_unmatched} windows have no healthy-reference match. "
+            "Expand reference coverage or document an explicit exclusion."
+        )
+
     for feature in NORMAL_FEATURES:
         p10_col = f"{feature}_P10"
         p90_col = f"{feature}_P90"
@@ -394,6 +446,7 @@ def main():
     p = paths(args.case_id)
 
     raw = pd.read_csv(p["raw"])
+    validate_blind_raw(raw)
     bands = pd.read_csv(p["bands"])
 
     windows = add_t4b_window_features(raw)

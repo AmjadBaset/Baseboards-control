@@ -28,6 +28,54 @@ DEFAULT_PERSISTENCE_THRESHOLDS_PATH = Path(
 DEFAULT_PERSISTENCE_FALLBACK = 0.02
 
 
+# Pure presentation mapping. These diagnoses are already assigned by rules.py;
+# aggregation must not infer compensation from comfort alone.
+HYDRAULIC_OPERATIONAL_STATUS = {
+    "possible_compensated_hydraulic_restriction": (
+        "compensation_suspected_comfort_maintained"
+    ),
+    "hydraulic_restriction_degraded": (
+        "delivery_degraded_comfort_maintained"
+    ),
+    "hydraulic_restriction_with_comfort_impact": "comfort_impacted",
+    "possible_flow_or_control_instability": "flow_or_control_instability",
+}
+
+def hydraulic_operational_status_for_room(main_diagnosis: str, severity: str) -> str:
+    """Report existing hydraulic signature while respecting whole-room impact.
+
+    The window-level compensated/degraded diagnoses describe the evidence within
+    selected windows. They DO NOT prove comfort was maintained across the full
+    analysis period. Reuse the existing room severity criterion to avoid
+    contradictory room-level labels, without adding or changing thresholds.
+    """
+    label = HYDRAULIC_OPERATIONAL_STATUS.get(
+        main_diagnosis, "not_hydraulic_main_diagnosis"
+    )
+    if severity == "fault":
+        if main_diagnosis == "possible_compensated_hydraulic_restriction":
+            return "compensation_signature_with_room_comfort_impact"
+        if main_diagnosis == "hydraulic_restriction_degraded":
+            return "delivery_degraded_with_room_comfort_impact"
+    return label
+
+
+HYDRAULIC_EVIDENCE_COLUMNS = {
+    "possible_compensated_hydraulic_restriction": (
+        "hydraulic_compensation_evidence_fraction"
+    ),
+    "hydraulic_restriction_degraded": (
+        "hydraulic_degraded_evidence_fraction"
+    ),
+    "hydraulic_restriction_with_comfort_impact": (
+        "hydraulic_comfort_impact_evidence_fraction"
+    ),
+    "possible_flow_or_control_instability": (
+        "hydraulic_instability_evidence_fraction"
+    ),
+}
+
+
 FAMILY_BY_DIAGNOSIS = {
     # Valve faults
     "possible_valve_leakage_or_stuck_open": "stuck_open_or_leakage",
@@ -45,6 +93,7 @@ FAMILY_BY_DIAGNOSIS = {
 
     # Oversupply / overheating
     "possible_excessive_heating_capacity_or_oversupply": "oversupply_or_overheating",
+    "possible_oversupply_or_overheating": "oversupply_or_overheating",
     "possible_nonhydronic_or_unexplained_overheating": "oversupply_or_overheating",
 
     # Fallback
@@ -66,6 +115,7 @@ DIAGNOSIS_PRIORITY = [
     "possible_emitter_undersizing_or_high_load",
 
     "possible_excessive_heating_capacity_or_oversupply",
+    "possible_oversupply_or_overheating",
     "possible_nonhydronic_or_unexplained_overheating",
 
     "possible_flow_or_control_instability",
@@ -168,12 +218,18 @@ def load_persistence_thresholds(
             f"{sorted(missing)}"
         )
 
-    return {
-        str(row["diagnosis"]): float(row["persistence_threshold"])
-        for _, row in df.iterrows()
-        if pd.notna(row["diagnosis"])
-        and pd.notna(row["persistence_threshold"])
-    }
+    thresholds = {}
+    for _, row in df.iterrows():
+        if pd.isna(row["diagnosis"]) or pd.isna(row["persistence_threshold"]):
+            continue
+        name = str(row["diagnosis"]).strip()
+        value = float(row["persistence_threshold"])
+        if not (0.0 <= value <= 1.0):
+            raise ValueError(f"Invalid persistence threshold for {name}: {value}")
+        if name in thresholds:
+            raise ValueError(f"Duplicate persistence calibration diagnosis: {name}")
+        thresholds[name] = value
+    return thresholds
 
 def parse_diagnosis_text(value) -> list[str]:
     """
@@ -271,6 +327,8 @@ def choose_main_diagnosis(
     Diagnoses absent from healthy calibration use the configured fallback.
     Diagnosis fraction is ranked first; priority is only a tie-breaker.
     """
+    if not 0.0 <= fallback_threshold <= 1.0:
+        raise ValueError("Persistence fallback must be in [0, 1].")
     significant: dict[str, tuple[float, float]] = {}
 
     for diagnosis, fraction in fractions.items():
@@ -472,6 +530,11 @@ def summarize_room(
         "dominant_fault_family": (
             dominant_fault_family
         ),
+        # Readable hydraulic subtype: derives ONLY from the existing
+        # persistence-selected main diagnosis, never from injected truth.
+        "hydraulic_operational_status": hydraulic_operational_status_for_room(
+            main_diagnosis, severity
+        ),
         "dominant_fault_fraction": (
             main_diagnosis_fraction
         ),
@@ -533,6 +596,12 @@ def summarize_room(
             row[col] = float(
                 g[col].mean()
             )
+
+    # Explicit, stable columns for ALL hydraulic signatures, including zeros
+    # when the diagnosis never occurred. Multiple signatures can coexist,
+    # while the operational status reflects the dominant main diagnosis only.
+    for diagnosis, column in HYDRAULIC_EVIDENCE_COLUMNS.items():
+        row[column] = float(fractions.get(diagnosis, 0.0))
 
     # Transparent room-level diagnosis probabilities.
     for diagnosis, fraction in sorted(
@@ -690,6 +759,7 @@ def main() -> None:
                 "fault_type",
                 "dominant_fault_family",
                 "main_diagnosis",
+                "hydraulic_operational_status",
                 "severity",
                 "comfort_violation_fraction",
                 "main_diagnosis_fraction",

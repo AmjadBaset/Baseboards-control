@@ -27,3 +27,11 @@ scripts/generated_files/
 
 # Generated diagnostic reports
 reports/
+
+# Local secrets and temporary files
+.env
+.env.*
+!.env.example
+*.bak
+.pytest_cache/
+*.log

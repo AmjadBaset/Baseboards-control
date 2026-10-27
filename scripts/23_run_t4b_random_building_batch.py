@@ -26,6 +26,8 @@ It then calls 24_evaluate_t4b_random_building_batch.py unless --no-evaluate is u
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import subprocess
 import sys
 import time
@@ -38,6 +40,33 @@ GENERATOR = Path("scripts/21_run_t4b_random_building_case.py")
 CLASSIFIER = Path("scripts/11_classify_t4b_against_openstudio_bands.py")
 SUMMARIZER = Path("scripts/12_summarize_t4b_room_diagnosis.py")
 EVALUATOR = Path("scripts/24_evaluate_t4b_random_building_batch.py")
+
+# Exactly these sources must remain unchanged when an existing diagnosis is
+# reused. A matching simulation hash alone is not enough.
+PIPELINE_FINGERPRINT_SOURCES = {
+    "generator": GENERATOR,
+    "classifier": CLASSIFIER,
+    "summarizer": SUMMARIZER,
+    "diagnostic_rules": Path("src/baseboard_diagnostics/diagnosis/rules.py"),
+    "persistence_calibration": Path(
+        "data/reference_bands/openstudio/apartment_1970/"
+        "diagnosis_persistence_thresholds_new.csv"
+    ),
+    "healthy_reference_bands": Path(
+        "data/reference_bands/openstudio/apartment_1970/"
+        "apartment_baseboard_reference_bands_area_exposure_new.csv"
+    ),
+}
+
+
+def pipeline_fingerprints() -> dict[str, str]:
+    fingerprints = {}
+    for name, path in PIPELINE_FINGERPRINT_SOURCES.items():
+        if not path.is_file():
+            raise FileNotFoundError(f"Missing freeze/provenance input {name}: {path}")
+        fingerprints[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return fingerprints
+
 
 
 def parse_seed_spec(spec: str) -> list[int]:
@@ -178,6 +207,7 @@ def main() -> None:
     report_dir.mkdir(parents=True, exist_ok=True)
 
     rows: list[dict] = []
+    expected_fingerprints = pipeline_fingerprints() if not args.no_diagnostics else None
 
     print("Randomized-building validation batch")
     print(f"  batch: {batch_name}")
@@ -222,7 +252,25 @@ def main() -> None:
         )
 
         if args.skip_existing and complete_existing:
-            print("Existing complete case found; reusing it.")
+            manifest_path = Path(paths["operational"]).parent / "simulation_manifest.json"
+            manifest = (
+                json.loads(manifest_path.read_text(encoding="utf-8"))
+                if manifest_path.exists() else {}
+            )
+            current_sha = hashlib.sha256(GENERATOR.read_bytes()).hexdigest()
+            provenance_path = Path(paths["operational"]).parent / "diagnostics_fingerprints.json"
+            saved = (
+                json.loads(provenance_path.read_text(encoding="utf-8"))
+                if provenance_path.is_file() else {}
+            )
+            if (manifest.get("generator_sha256") != current_sha
+                    or saved != expected_fingerprints):
+                raise RuntimeError(
+                    f"Refusing to reuse {case_id}: generator or diagnostic "
+                    "fingerprints differ (or were not recorded). "
+                    "Use fresh case IDs after any revision."
+                )
+            print("Existing case has matching generator and diagnostic fingerprints; reusing.")
             row.update(
                 {
                     "status": "reused",
@@ -307,6 +355,12 @@ def main() -> None:
         )
         row["summary_status"] = "ok" if result.returncode == 0 else "failed"
         row["status"] = "ok" if result.returncode == 0 else "failed_summary"
+        if result.returncode == 0:
+            provenance_path = Path(paths["operational"]).parent / "diagnostics_fingerprints.json"
+            provenance_path.write_text(
+                json.dumps(expected_fingerprints, indent=2) + "\n",
+                encoding="utf-8",
+            )
         row["elapsed_s"] = time.time() - case_start
         rows.append(row)
 

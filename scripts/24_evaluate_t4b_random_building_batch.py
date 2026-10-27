@@ -39,10 +39,12 @@ FORBIDDEN_OPERATIONAL_COLUMNS = {
     "restriction_factor",
     "fixed_valve_position",
     "fixed_valve_regime",
+    "fixed_valve_quantile",
     "valve_upper_limit",
     "valve_lower_limit",
     "valve_limit_quantile",
     "valve_binding_fraction",
+    "valve_mean_absolute_position_change",
     "valve_binding_count",
     "valve_post_fault_step_count",
     "valve_fault_activated",
@@ -61,6 +63,7 @@ DIAGNOSIS_TO_EVAL_FAMILY = {
     "insufficient_heat_output": "insufficient_heat_output",
     "possible_emitter_undersizing_or_high_load": "insufficient_heat_output",
     "possible_excessive_heating_capacity_or_oversupply": "oversupply_or_overheating",
+    "possible_oversupply_or_overheating": "oversupply_or_overheating",
     "possible_nonhydronic_or_unexplained_overheating": "oversupply_or_overheating",
     "comfort_violation_without_matched_diagnostic_rule": "unclassified",
 }
@@ -220,10 +223,12 @@ def read_case(case_row: pd.Series) -> tuple[pd.DataFrame, pd.DataFrame]:
             "restriction_factor",
             "fixed_valve_position",
             "fixed_valve_regime",
+            "fixed_valve_quantile",
             "valve_upper_limit",
             "valve_lower_limit",
             "valve_limit_quantile",
             "valve_binding_fraction",
+            "valve_mean_absolute_position_change",
             "valve_binding_count",
             "valve_post_fault_step_count",
             "valve_fault_activated",
@@ -231,6 +236,15 @@ def read_case(case_row: pd.Series) -> tuple[pd.DataFrame, pd.DataFrame]:
         if c in summary.columns
     ]
     summary = summary.drop(columns=legacy_truth_cols, errors="ignore")
+
+    if summary["zone"].duplicated().any() or truth["zone"].duplicated().any():
+        raise ValueError(f"Duplicate room zones in case {case_id}.")
+    if set(summary["zone"]) != set(truth["zone"]):
+        raise ValueError(
+            f"Diagnosed/ground-truth zone sets differ for {case_id}: "
+            f"missing={set(truth['zone']) - set(summary['zone'])}, "
+            f"extra={set(summary['zone']) - set(truth['zone'])}"
+        )
 
     room = summary.merge(
         truth,
@@ -279,8 +293,13 @@ def read_case(case_row: pd.Series) -> tuple[pd.DataFrame, pd.DataFrame]:
     diagnosed["window_start"] = pd.to_datetime(
         diagnosed["window_start"],
         utc=True,
-        errors="coerce",
+        errors="raise",
     )
+    # Script 11's aggregation uses non-overlapping, 3-hour diagnostic windows.
+    # A window's diagnosis is not available until all samples have arrived.
+    # Half-open interval: [window_start, window_end); detection at window_end.
+    diagnostic_duration = pd.Timedelta(hours=3)
+    diagnosed["window_end"] = diagnosed["window_start"] + diagnostic_duration
 
     truth_by_zone = truth.set_index("zone").to_dict("index")
 
@@ -324,11 +343,13 @@ def read_case(case_row: pd.Series) -> tuple[pd.DataFrame, pd.DataFrame]:
             )
         else:
             fault_start = pd.to_datetime(gt["fault_start"], utc=True)
-            pre = g[g["window_start"] < fault_start]
+            # A window overlapping onset is neither a wholly healthy baseline
+            # nor a wholly post-fault window. Exclude it from both comparisons.
+            pre = g[g["window_end"] <= fault_start]
             post = g[g["window_start"] >= fault_start]
 
-            first_abnormal = post.loc[post["is_abnormal"], "window_start"]
-            first_correct = post.loc[post["is_correct_family"], "window_start"]
+            first_abnormal = post.loc[post["is_abnormal"], "window_end"]
+            first_correct = post.loc[post["is_correct_family"], "window_end"]
 
             first_detection_delay_h = (
                 (first_abnormal.iloc[0] - fault_start).total_seconds() / 3600.0
@@ -639,10 +660,12 @@ def main() -> None:
                 "fault_type",
                 "fault_severity",
                 "fixed_valve_position",
+                "fixed_valve_quantile",
                 "valve_limit_quantile",
                 "valve_upper_limit",
                 "valve_lower_limit",
                 "valve_binding_fraction",
+            "valve_mean_absolute_position_change",
                 "valve_binding_count",
                 "valve_post_fault_step_count",
                 "valve_fault_activated",
@@ -657,6 +680,35 @@ def main() -> None:
             if c in room_results.columns
         ]
     ].copy()
+
+    # Evaluation-only activation strata. This never changes the primary injected
+    # ground-truth label or the main confusion matrix. Controller requests are
+    # deliberately not available to diagnostic code.
+    if "valve_binding_fraction" in valve_fault_activation_results.columns:
+        val = pd.to_numeric(
+            valve_fault_activation_results["valve_binding_fraction"],
+            errors="coerce",
+        )
+        valve_fault_activation_results["activation_stratum"] = np.select(
+            [val.isna(), val < 0.01, val < 0.05],
+            ["unknown", "<1%", "1-5%"],
+            default=">=5%",
+        )
+
+    # Report the ability to detect valve faults at different physical activation
+    # levels without excluding low-activation faults from primary metrics.
+    activation_metrics_rows = []
+    if "activation_stratum" in valve_fault_activation_results.columns:
+        for activation, group in valve_fault_activation_results.groupby(
+            "activation_stratum", dropna=False
+        ):
+            activation_metrics_rows.append({
+                "activation_stratum": activation,
+                "n_injected_valve_faults": len(group),
+                "detected_fraction": float(group["predicted_fault"].mean()),
+                "correct_family_fraction": float(group["family_correct"].mean()),
+            })
+    activation_metrics = pd.DataFrame(activation_metrics_rows)
 
     # Merge temporal fields into the per-room table for a single comprehensive
     # analysis dataset.
@@ -685,6 +737,7 @@ def main() -> None:
         "temporal_detection_metrics.csv": temporal,
         "restriction_factor_results.csv": restriction_results,
         "valve_fault_activation_results.csv": valve_fault_activation_results,
+        "valve_fault_activation_stratified_metrics.csv": activation_metrics,
     }
 
     for filename, df in outputs.items():

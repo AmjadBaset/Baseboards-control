@@ -69,23 +69,12 @@ def add_window_features(raw: pd.DataFrame, window: str) -> pd.DataFrame:
     df = raw.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-    # Explicitly drop any accidental validation/debug columns. New generated
-    # operational files should not contain them, but this keeps the sensitivity
-    # analysis blind if an older case is included by mistake.
-    df = df.drop(
-        columns=[
-            "fault_type",
-            "fault_severity",
-            "fault_start",
-            "restriction_factor",
-            "fixed_valve_position",
-            "valve_upper_limit",
-            "valve_lower_limit",
-            "valve_max_flow",
-            "controller_signal",
-        ],
-        errors="ignore",
-    )
+    forbidden = { "fault_type", "fault_severity", "fault_start", "fault_start_step", "restriction_factor", "fixed_valve_position", "fixed_valve_regime", "fixed_valve_quantile", "valve_upper_limit", "valve_lower_limit", "valve_limit_quantile", "valve_binding_fraction", "valve_binding_count", "valve_mean_absolute_position_change", "valve_post_fault_step_count", "valve_fault_activated", "controller_signal", "valve_max_flow", "healthy_valve_max_flow_kg_s" }.intersection(df.columns)
+    if forbidden:
+        raise ValueError(
+            f"Ground truth/controller leak in window sensitivity input: "
+            f"{sorted(forbidden)}"
+        )
 
     df = add_timestep_features(
         df,
@@ -140,11 +129,15 @@ def add_window_features(raw: pd.DataFrame, window: str) -> pd.DataFrame:
     extra = pd.DataFrame(rows)
     windows["window_start"] = pd.to_datetime(windows["window_start"])
     extra["window_start"] = pd.to_datetime(extra["window_start"])
-    return windows.merge(
+    merged = windows.merge(
         extra,
         on=["case_id", "zone", "baseboard", "window_start"],
         how="left",
+        validate="one_to_one",
     )
+    if merged["valve_position_mean"].isna().any():
+        raise ValueError("Sensitivity valve-window alignment failed.")
+    return merged
 
 
 def truth_eval_family(fault_type: str) -> str:
